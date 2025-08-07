@@ -57,10 +57,7 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
                     └─────────────────┘
 ```
 
-*The rest of the original README content is preserved.*
-```
-
-## 🔐 Compliance Standards
+# ðŸ” Compliance Standards
 
 ### CIS AWS Foundations Benchmark v1.2.0
 - **Identity and Access Management** - Root account restrictions, MFA enforcement, IAM policies
@@ -88,46 +85,46 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
 - **Evidence Management** - Organizes and stores compliance evidence
 - **Reporting** - Generates comprehensive compliance reports
 
-## 📁 Project Structure
+## ðŸ“ Project Structure
 
 ```
 AWS-Automation-Patching-and-Reporting/
-├── cloudformation/           # Infrastructure as Code
-│   ├── main-stack.yaml      # Main CloudFormation stack
-│   ├── inspector-stack.yaml # Inspector configuration
-│   ├── patch-stack.yaml     # Patch Manager setup
-│   ├── security-hub-stack.yaml # Security Hub configuration
-│   ├── aws-config-stack.yaml # AWS Config rules and monitoring
-│   └── audit-manager-stack.yaml # AWS Audit Manager integration
-├── scripts/                  # Automation scripts
-│   ├── python/              # Python automation
-│   │   ├── inspector_handler.py
-│   │   ├── patch_approver.py
-│   │   ├── compliance_scanner.py
-│   │   ├── config_compliance_integration.py
-│   │   └── audit_manager_integration.py
-│   └── powershell/          # PowerShell scripts
-│       ├── audit_services.ps1
-│       ├── compliance_audit.ps1
-│       └── patch_inventory.ps1
-├── lambda/                   # Lambda functions
-│   ├── inspector_processor/
-│   ├── patch_approver/
-│   ├── security_hub_processor/
-│   ├── config_compliance_processor/
-│   └── audit_manager_processor/
-├── templates/                # SSM document templates
-│   ├── audit-document.yaml
-│   └── patch-document.yaml
-└── docs/                     # Documentation
-    ├── deployment-guide.md
-    ├── security-hub-integration.md
-    ├── aws-config-integration.md
-    ├── audit-manager-integration.md
-    └── troubleshooting.md
+â”œâ”€â”€ cloudformation/           # Infrastructure as Code
+â”‚   â”œâ”€â”€ main-stack.yaml      # Main CloudFormation stack
+â”‚   â”œâ”€â”€ inspector-stack.yaml # Inspector configuration
+â”‚   â”œâ”€â”€ patch-stack.yaml     # Patch Manager setup
+â”‚   â”œâ”€â”€ security-hub-stack.yaml # Security Hub configuration
+â”‚   â”œâ”€â”€ aws-config-stack.yaml # AWS Config rules and monitoring
+â”‚   â””â”€â”€ audit-manager-stack.yaml # AWS Audit Manager integration
+â”œâ”€â”€ scripts/                  # Automation scripts
+â”‚   â”œâ”€â”€ python/              # Python automation
+â”‚   â”‚   â”œâ”€â”€ inspector_handler.py
+â”‚   â”‚   â”œâ”€â”€ patch_approver.py
+â”‚   â”‚   â”œâ”€â”€ compliance_scanner.py
+â”‚   â”‚   â”œâ”€â”€ config_compliance_integration.py
+â”‚   â”‚   â””â”€â”€ audit_manager_integration.py
+â”‚   â””â”€â”€ powershell/          # PowerShell scripts
+â”‚       â”œâ”€â”€ audit_services.ps1
+â”‚       â”œâ”€â”€ compliance_audit.ps1
+â”‚       â””â”€â”€ patch_inventory.ps1
+â”œâ”€â”€ lambda/                   # Lambda functions
+â”‚   â”œâ”€â”€ inspector_processor/
+â”‚   â”œâ”€â”€ patch_approver/
+â”‚   â”œâ”€â”€ security_hub_processor/
+â”‚   â”œâ”€â”€ config_compliance_processor/
+â”‚   â””â”€â”€ audit_manager_processor/
+â”œâ”€â”€ templates/                # SSM document templates
+â”‚   â”œâ”€â”€ audit-document.yaml
+â”‚   â””â”€â”€ patch-document.yaml
+â””â”€â”€ docs/                     # Documentation
+    â”œâ”€â”€ deployment-guide.md
+    â”œâ”€â”€ security-hub-integration.md
+    â”œâ”€â”€ aws-config-integration.md
+    â”œâ”€â”€ audit-manager-integration.md
+    â””â”€â”€ troubleshooting.md
 ```
 
-## 🚀 Quick Start
+## ðŸš€ Quick Start
 
 ### Prerequisites
 
@@ -199,7 +196,7 @@ AWS-Automation-Patching-and-Reporting/
      --capabilities CAPABILITY_NAMED_IAM
    ```
 
-## 🔍 Compliance Scanning
+## Compliance Scanning
 
 ### Multi-Layer Compliance Monitoring
 
@@ -301,7 +298,7 @@ Perform local compliance checks on Windows instances:
 - Anti-virus status and firewall configuration
 - UAC settings and BitLocker status
 
-## 🔧 Configuration
+## Configuration
 
 ### Patch Approval Workflow
 
@@ -353,7 +350,7 @@ Edit `config/patch-config.json` to customize:
 - Reporting schedules
 - Compliance monitoring preferences
 
-## 📊 Monitoring and Reporting
+## Monitoring and Reporting
 
 ### Available Reports
 
@@ -376,11 +373,11 @@ Reports are stored in S3 and can be accessed via:
 ### Compliance Dashboard
 
 Access compliance information through:
-1. **AWS Security Hub Console** → Compliance
+1. **AWS Security Hub Console** â†’ Compliance
 2. **S3 Reports** - JSON format for programmatic access
 3. **CloudWatch Metrics** - Custom metrics for compliance scores
 
-## 🔒 Security
+## Security
 
 - All IAM roles follow least privilege principle
 - Patch approvals require explicit authorization
@@ -388,7 +385,7 @@ Access compliance information through:
 - Sensitive data is encrypted at rest and in transit
 - Compliance data is protected with appropriate access controls
 
-## 🛠️ Troubleshooting
+## Troubleshooting
 
 See `docs/troubleshooting.md` for common issues and solutions.
 
@@ -409,7 +406,7 @@ See `docs/troubleshooting.md` for common issues and solutions.
    aws logs tail /aws/lambda/SecurityHubProcessor-dev --region us-east-1
    ```
 
-## 📈 Best Practices
+## Best Practices
 
 ### Compliance Management
 - Run compliance scans weekly
@@ -423,11 +420,11 @@ See `docs/troubleshooting.md` for common issues and solutions.
 - Set up comprehensive alerting and monitoring
 - Generate executive summaries and detailed technical reports
 
-## 📝 License
+## License
 
 MIT License - see LICENSE file for details.
 
-## 🤝 Contributing
+## Contributing
 
 1. Fork the repository
 2. Create a feature branch
@@ -435,7 +432,7 @@ MIT License - see LICENSE file for details.
 4. Add tests
 5. Submit a pull request
 
-## 📞 Support
+## Support
 
 For issues and questions:
 - Create an issue in this repository
@@ -443,13 +440,11 @@ For issues and questions:
 - Review the Security Hub integration guide
 - Review AWS documentation for Inspector, Security Hub, and Patch Manager
 
-## 🔗 Related Documentation
+## ðŸ”— Related Documentation
 
 - [Security Hub Integration Guide](docs/security-hub-integration.md)
 - [AWS Security Hub User Guide](https://docs.aws.amazon.com/securityhub/)
 - [CIS AWS Foundations Benchmark](https://www.cisecurity.org/benchmark/amazon_web_services/)
 - [PCI DSS Requirements](https://www.pcisecuritystandards.org/document_library)
 - [AWS Systems Manager Patch Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager.html)
-- [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #   A W S - A u t o m a t i o n - P a t c h i n g - a n d - R e p o r t i n g 
- 
- 
+- [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #
