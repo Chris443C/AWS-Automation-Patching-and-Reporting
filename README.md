@@ -57,7 +57,7 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
                     └─────────────────┘
 ```
 
-# ðŸ” Compliance Standards
+# Compliance Standards
 
 ### CIS AWS Foundations Benchmark v1.2.0
 - **Identity and Access Management** - Root account restrictions, MFA enforcement, IAM policies
@@ -85,7 +85,7 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
 - **Evidence Management** - Organizes and stores compliance evidence
 - **Reporting** - Generates comprehensive compliance reports
 
-## ðŸ“ Project Structure
+## Project Structure
 
 ```
 AWS-Automation-Patching-and-Reporting/
@@ -124,7 +124,7 @@ AWS-Automation-Patching-and-Reporting/
     â””â”€â”€ troubleshooting.md
 ```
 
-## ðŸš€ Quick Start
+## Quick Start
 
 ### Prerequisites
 
@@ -448,3 +448,4 @@ For issues and questions:
 - [PCI DSS Requirements](https://www.pcisecuritystandards.org/document_library)
 - [AWS Systems Manager Patch Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager.html)
 - [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #
+
