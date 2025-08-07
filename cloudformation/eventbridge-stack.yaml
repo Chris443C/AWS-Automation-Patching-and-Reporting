@@ -1,0 +1,467 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'EventBridge infrastructure for microservices orchestration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+
+Resources:
+  # Custom EventBridge Bus
+  PatchingAutomationEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub 'patching-automation-${Environment}'
+      Description: 'Custom event bus for patching automation microservices'
+      EventSourceName: 'patching-automation'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: 'patching-automation'
+
+  # Dead Letter Queue for failed events
+  EventProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'patching-automation-events-dlq-${Environment}'
+      MessageRetentionPeriod: 1209600  # 14 days
+      VisibilityTimeoutSeconds: 60
+      KmsMasterKeyId: 'alias/aws/sqs'
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Event Rules for different event types
+  VulnerabilityDetectedRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'vulnerability-detected-${Environment}'
+      Description: 'Route vulnerability detection events to patch approval workflow'
+      EventBusName: !Ref PatchingAutomationEventBus
+      EventPattern:
+        source: ['aws.inspector2', 'patching-automation.vulnerability-scanner']
+        detail-type: ['Inspector2 Finding', 'Vulnerability Detected']
+        detail:
+          severity: ['CRITICAL', 'HIGH']
+          state: ['ACTIVE']
+      State: ENABLED
+      Targets:
+        - Arn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-approval-workflow-${Environment}'
+          Id: 'VulnerabilityToPatchApproval'
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+          DeadLetterConfig:
+            Arn: !GetAtt EventProcessingDLQ.Arn
+
+  ComplianceViolationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'compliance-violation-${Environment}'
+      Description: 'Route compliance violation events to compliance remediation'
+      EventBusName: !Ref PatchingAutomationEventBus
+      EventPattern:
+        source: ['aws.config', 'aws.securityhub', 'patching-automation.compliance-scanner']
+        detail-type: ['Config Rules Compliance Change', 'Security Hub Findings - Imported', 'Compliance Violation Detected']
+        detail:
+          compliance-status: ['NON_COMPLIANT']
+      State: ENABLED
+      Targets:
+        - Arn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:compliance-remediation-workflow-${Environment}'
+          Id: 'ComplianceViolationToRemediation'
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+
+  PatchApprovalRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'patch-approval-${Environment}'
+      Description: 'Route patch approval events to installation workflow'
+      EventBusName: !Ref PatchingAutomationEventBus
+      EventPattern:
+        source: ['patching-automation.patch-approver']
+        detail-type: ['Patch Approved', 'Patch Rejected']
+        detail:
+          approval-status: ['APPROVED']
+      State: ENABLED
+      Targets:
+        - Arn: !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-installation-workflow-${Environment}'
+          Id: 'PatchApprovalToInstallation'
+          RoleArn: !GetAtt EventBridgeExecutionRole.Arn
+
+  ComplianceScanScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'compliance-scan-schedule-${Environment}'
+      Description: 'Scheduled compliance scanning'
+      EventBusName: !Ref PatchingAutomationEventBus
+      ScheduleExpression: 'cron(0 2 * * ? *)'  # Daily at 2 AM
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ComplianceScannerFunction.Arn
+          Id: 'ScheduledComplianceScan'
+          Input: |
+            {
+              "eventType": "scheduled-scan",
+              "scanType": "full",
+              "source": "eventbridge-schedule"
+            }
+
+  PatchScanScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'patch-scan-schedule-${Environment}'
+      Description: 'Scheduled patch scanning'
+      EventBusName: !Ref PatchingAutomationEventBus
+      ScheduleExpression: 'cron(0 4 * * ? *)'  # Daily at 4 AM
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt VulnerabilityScannerFunction.Arn
+          Id: 'ScheduledPatchScan'
+          Input: |
+            {
+              "eventType": "scheduled-scan",
+              "scanType": "patches",
+              "source": "eventbridge-schedule"
+            }
+
+  # IAM Role for EventBridge to invoke Step Functions
+  EventBridgeExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'EventBridgeExecutionRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: EventBridgeExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource:
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-approval-workflow-${Environment}'
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:compliance-remediation-workflow-${Environment}'
+                  - !Sub 'arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-installation-workflow-${Environment}'
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !GetAtt ComplianceScannerFunction.Arn
+                  - !GetAtt VulnerabilityScannerFunction.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt EventProcessingDLQ.Arn
+
+  # CloudWatch Log Group for EventBridge
+  EventBridgeLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/events/patching-automation-${Environment}'
+      RetentionInDays: 30
+
+  # Microservice Lambda Functions
+  ComplianceScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'compliance-scanner-microservice-${Environment}'
+      Runtime: python3.11
+      Handler: compliance_scanner_microservice.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              # Placeholder for microservice logic
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Compliance scanner microservice executed',
+                      'event': event
+                  })
+              }
+      Role: !GetAtt MicroserviceLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENT_BUS_NAME: !Ref PatchingAutomationEventBus
+          LOG_LEVEL: INFO
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Microservice
+          Value: 'compliance-scanner'
+
+  VulnerabilityScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'vulnerability-scanner-microservice-${Environment}'
+      Runtime: python3.11
+      Handler: vulnerability_scanner_microservice.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              # Placeholder for microservice logic
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Vulnerability scanner microservice executed',
+                      'event': event
+                  })
+              }
+      Role: !GetAtt MicroserviceLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 1024
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENT_BUS_NAME: !Ref PatchingAutomationEventBus
+          LOG_LEVEL: INFO
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Microservice
+          Value: 'vulnerability-scanner'
+
+  PatchApproverFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'patch-approver-microservice-${Environment}'
+      Runtime: python3.11
+      Handler: patch_approver_microservice.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              # Placeholder for microservice logic
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Patch approver microservice executed',
+                      'event': event
+                  })
+              }
+      Role: !GetAtt MicroserviceLambdaRole.Arn
+      Timeout: 900
+      MemorySize: 512
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENT_BUS_NAME: !Ref PatchingAutomationEventBus
+          LOG_LEVEL: INFO
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Microservice
+          Value: 'patch-approver'
+
+  NotificationServiceFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'notification-service-microservice-${Environment}'
+      Runtime: python3.11
+      Handler: notification_service_microservice.lambda_handler
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+          
+          def lambda_handler(event, context):
+              logger.info(f"Received event: {json.dumps(event)}")
+              # Placeholder for microservice logic
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps({
+                      'message': 'Notification service microservice executed',
+                      'event': event
+                  })
+              }
+      Role: !GetAtt MicroserviceLambdaRole.Arn
+      Timeout: 300
+      MemorySize: 256
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          EVENT_BUS_NAME: !Ref PatchingAutomationEventBus
+          LOG_LEVEL: INFO
+      TracingConfig:
+        Mode: Active
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Microservice
+          Value: 'notification-service'
+
+  # IAM Role for Microservice Lambda Functions
+  MicroserviceLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'MicroserviceLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSXRayDaemonWriteAccess
+      Policies:
+        - PolicyName: MicroserviceExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # EventBridge permissions
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !GetAtt PatchingAutomationEventBus.Arn
+              # SSM Parameter Store permissions
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:GetParametersByPath
+                Resource: 
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/patching-automation/*'
+              # CloudWatch metrics permissions
+              - Effect: Allow
+                Action:
+                  - cloudwatch:PutMetricData
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 
+                      - 'AWS/PatchingAutomation'
+                      - 'AWS/PatchingAutomation/Microservices'
+              # Inspector permissions
+              - Effect: Allow
+                Action:
+                  - inspector2:ListFindings
+                  - inspector2:GetFinding
+                  - inspector2:ListScans
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              # Security Hub permissions
+              - Effect: Allow
+                Action:
+                  - securityhub:GetFindings
+                  - securityhub:GetInsights
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              # Systems Manager permissions
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:DescribeInstancePatchStates
+                  - ssm:DescribeInstancePatches
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+
+  # Lambda permissions for EventBridge to invoke functions
+  ComplianceScannerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ComplianceScannerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ComplianceScanScheduleRule.Arn
+
+  VulnerabilityScannerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref VulnerabilityScannerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PatchScanScheduleRule.Arn
+
+Outputs:
+  EventBusName:
+    Description: 'Name of the custom EventBridge bus'
+    Value: !Ref PatchingAutomationEventBus
+    Export:
+      Name: !Sub '${AWS::StackName}-EventBusName'
+
+  EventBusArn:
+    Description: 'ARN of the custom EventBridge bus'
+    Value: !GetAtt PatchingAutomationEventBus.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-EventBusArn'
+
+  MicroserviceLambdaRoleArn:
+    Description: 'ARN of the microservice Lambda execution role'
+    Value: !GetAtt MicroserviceLambdaRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MicroserviceLambdaRole'
+
+  ComplianceScannerFunctionArn:
+    Description: 'ARN of the compliance scanner microservice'
+    Value: !GetAtt ComplianceScannerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceScannerFunction'
+
+  VulnerabilityScannerFunctionArn:
+    Description: 'ARN of the vulnerability scanner microservice'
+    Value: !GetAtt VulnerabilityScannerFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-VulnerabilityScannerFunction'
+
+  PatchApproverFunctionArn:
+    Description: 'ARN of the patch approver microservice'
+    Value: !GetAtt PatchApproverFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-PatchApproverFunction'
+
+  NotificationServiceFunctionArn:
+    Description: 'ARN of the notification service microservice'
+    Value: !GetAtt NotificationServiceFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationServiceFunction'

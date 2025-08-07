@@ -1,0 +1,368 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Systems Manager Patch Manager Configuration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  OperatingSystem:
+    Type: String
+    Default: 'WINDOWS'
+    AllowedValues: ['WINDOWS', 'AMAZON_LINUX', 'AMAZON_LINUX_2', 'UBUNTU_PRO', 'REDHAT_ENTERPRISE_LINUX', 'SUSE', 'CENTOS', 'ORACLE_LINUX', 'DEBIAN', 'MACOS']
+    Description: 'Target operating system for patching'
+  
+  PatchApprovalDelay:
+    Type: Number
+    Default: 7
+    MinValue: 1
+    MaxValue: 30
+    Description: 'Number of days to wait for patch approval'
+
+Resources:
+  # Patch Baseline for Windows
+  WindowsPatchBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Condition: IsWindows
+    Properties:
+      Name: !Sub 'Windows-PatchBaseline-${Environment}'
+      Description: !Sub 'Windows patch baseline for ${Environment} environment'
+      OperatingSystem: WINDOWS
+      ApprovalRules:
+        PatchRules:
+          - PatchFilterGroup:
+              PatchFilters:
+                - Key: CLASSIFICATION
+                  Values:
+                    - SecurityUpdates
+                    - CriticalUpdates
+                - Key: SEVERITY
+                  Values:
+                    - Critical
+                    - Important
+            ApproveAfterDays: !Ref PatchApprovalDelay
+            ComplianceLevel: CRITICAL
+            EnableNonSecurity: false
+      GlobalFilters:
+        PatchFilters:
+          - Key: CLASSIFICATION
+            Values:
+              - SecurityUpdates
+              - CriticalUpdates
+              - DefinitionUpdates
+      ApprovedPatchesComplianceLevel: CRITICAL
+      RejectedPatchesAction: BLOCK
+
+  # Patch Baseline for Linux
+  LinuxPatchBaseline:
+    Type: AWS::SSM::PatchBaseline
+    Condition: IsLinux
+    Properties:
+      Name: !Sub 'Linux-PatchBaseline-${Environment}'
+      Description: !Sub 'Linux patch baseline for ${Environment} environment'
+      OperatingSystem: !Ref OperatingSystem
+      ApprovalRules:
+        PatchRules:
+          - PatchFilterGroup:
+              PatchFilters:
+                - Key: CLASSIFICATION
+                  Values:
+                    - Security
+                    - Bugfix
+                - Key: SEVERITY
+                  Values:
+                    - Critical
+                    - Important
+            ApproveAfterDays: !Ref PatchApprovalDelay
+            ComplianceLevel: CRITICAL
+            EnableNonSecurity: false
+      GlobalFilters:
+        PatchFilters:
+          - Key: CLASSIFICATION
+            Values:
+              - Security
+              - Bugfix
+      ApprovedPatchesComplianceLevel: CRITICAL
+      RejectedPatchesAction: BLOCK
+
+  # Patch Group
+  PatchGroup:
+    Type: AWS::SSM::PatchGroup
+    Properties:
+      BaselineId: !If [IsWindows, !Ref WindowsPatchBaseline, !Ref LinuxPatchBaseline]
+      PatchGroup: !Sub '${Environment}-servers'
+
+  # Maintenance Window for Patch Scanning
+  PatchScanWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: !Sub 'PatchScanWindow-${Environment}'
+      Description: 'Maintenance window for patch scanning operations'
+      Schedule: cron(0 2 * * ? *)
+      Duration: 2
+      Cutoff: 1
+      AllowUnassociatedTargets: false
+
+  # Maintenance Window for Patch Installation
+  PatchInstallWindow:
+    Type: AWS::SSM::MaintenanceWindow
+    Properties:
+      Name: !Sub 'PatchInstallWindow-${Environment}'
+      Description: 'Maintenance window for patch installation operations'
+      Schedule: cron(0 4 * * ? *)
+      Duration: 4
+      Cutoff: 1
+      AllowUnassociatedTargets: false
+
+  # IAM Role for Maintenance Windows
+  MaintenanceWindowRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'MaintenanceWindowRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ssm.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMMaintenanceWindowRole
+
+  # Maintenance Window Target for Scanning
+  PatchScanTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      WindowId: !Ref PatchScanWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: tag:PatchGroup
+          Values:
+            - !Sub '${Environment}-servers'
+
+  # Maintenance Window Target for Installation
+  PatchInstallTarget:
+    Type: AWS::SSM::MaintenanceWindowTarget
+    Properties:
+      WindowId: !Ref PatchInstallWindow
+      ResourceType: INSTANCE
+      Targets:
+        - Key: tag:PatchGroup
+          Values:
+            - !Sub '${Environment}-servers'
+
+  # Maintenance Window Task for Patch Scanning
+  PatchScanTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      WindowId: !Ref PatchScanWindow
+      TaskArn: AWS-RunPatchBaseline
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        RunCommand:
+          Parameters:
+            Operation:
+              - Scan
+            SnapshotId:
+              - !Sub '${Environment}-scan-{{ssm:current_date}}'
+      Priority: 1
+      MaxConcurrency: 10
+      MaxErrors: 2
+      ServiceRoleArn: !GetAtt MaintenanceWindowRole.Arn
+      TargetArn: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:target/${PatchScanTarget}'
+
+  # Maintenance Window Task for Patch Installation
+  PatchInstallTask:
+    Type: AWS::SSM::MaintenanceWindowTask
+    Properties:
+      WindowId: !Ref PatchInstallWindow
+      TaskArn: AWS-RunPatchBaseline
+      TaskType: RUN_COMMAND
+      TaskInvocationParameters:
+        RunCommand:
+          Parameters:
+            Operation:
+              - Install
+            SnapshotId:
+              - !Sub '${Environment}-install-{{ssm:current_date}}'
+      Priority: 1
+      MaxConcurrency: 5
+      MaxErrors: 1
+      ServiceRoleArn: !GetAtt MaintenanceWindowRole.Arn
+      TargetArn: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:target/${PatchInstallTarget}'
+
+  # State Manager Association for Patch Compliance
+  PatchComplianceAssociation:
+    Type: AWS::SSM::Association
+    Properties:
+      Name: !Sub 'PatchCompliance-${Environment}'
+      DocumentName: AWS-RunPatchBaseline
+      Parameters:
+        Operation:
+          - Scan
+        SnapshotId:
+          - !Sub '${Environment}-compliance-{{ssm:current_date}}'
+      Targets:
+        - Key: tag:PatchGroup
+          Values:
+            - !Sub '${Environment}-servers'
+      ScheduleExpression: cron(0 6 * * ? *)
+      ComplianceSeverity: CRITICAL
+
+  # Systems Manager Parameter for Patch Configuration
+  PatchManagerConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/patch-manager/${Environment}/config'
+      Type: String
+      Value: !Sub |
+        {
+          "scanSchedule": "cron(0 2 * * ? *)",
+          "installSchedule": "cron(0 4 * * ? *)",
+          "approvalDelay": ${PatchApprovalDelay},
+          "maxConcurrency": 10,
+          "maxErrors": 2,
+          "complianceSeverity": "CRITICAL",
+          "autoApprovalThreshold": 8.0
+        }
+      Description: 'Patch Manager configuration'
+
+  # EventBridge Rule for Patch Compliance Events
+  PatchComplianceRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'PatchComplianceEvents-${Environment}'
+      Description: 'Capture patch compliance events'
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventName:
+            - SendCommand
+            - GetCommandInvocation
+          requestParameters:
+            documentName:
+              - AWS-RunPatchBaseline
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt PatchComplianceProcessor.Arn
+          Id: PatchComplianceTarget
+
+  # Lambda Function to Process Patch Compliance
+  PatchComplianceProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'PatchComplianceProcessor-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/PatchingAutomationLambdaRole-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              ssm = boto3.client('ssm')
+              s3 = boto3.client('s3')
+              
+              compliance_data = []
+              
+              for record in event['Records']:
+                  detail = record['detail']
+                  if detail.get('eventName') == 'SendCommand':
+                      command_id = detail['responseElements']['command']['commandId']
+                      instance_id = detail['requestParameters']['instanceIds'][0]
+                      
+                      # Get command invocation details
+                      try:
+                          response = ssm.get_command_invocation(
+                              CommandId=command_id,
+                              InstanceId=instance_id
+                          )
+                          
+                          compliance_data.append({
+                              'commandId': command_id,
+                              'instanceId': instance_id,
+                              'status': response['Status'],
+                              'executionTime': response.get('ExecutionTime'),
+                              'output': response.get('StandardOutputContent', ''),
+                              'error': response.get('StandardErrorContent', ''),
+                              'timestamp': datetime.now().isoformat()
+                          })
+                      except Exception as e:
+                          print(f"Error getting command invocation: {e}")
+              
+              # Store compliance data in S3
+              if compliance_data:
+                  bucket_name = os.environ['S3_BUCKET']
+                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  key = f'patch-compliance/{timestamp}_compliance.json'
+                  
+                  s3.put_object(
+                      Bucket=bucket_name,
+                      Key=key,
+                      Body=json.dumps(compliance_data, indent=2),
+                      ContentType='application/json'
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f'Processed {len(compliance_data)} compliance records')
+              }
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !ImportValue 
+            'Fn::Sub': '${AWS::StackName:aws-patching-automation}-ReportsBucket'
+
+  # Lambda Permission for EventBridge
+  PatchCompliancePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PatchComplianceProcessor
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt PatchComplianceRule.Arn
+
+  # CloudWatch Log Group for Patch Compliance
+  PatchComplianceLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/PatchComplianceProcessor-${Environment}'
+      RetentionInDays: 30
+
+Conditions:
+  IsWindows: !Equals [!Ref OperatingSystem, 'WINDOWS']
+  IsLinux: !Not [!Equals [!Ref OperatingSystem, 'WINDOWS']]
+
+Outputs:
+  PatchBaselineId:
+    Description: 'Patch baseline ID'
+    Value: !If [IsWindows, !Ref WindowsPatchBaseline, !Ref LinuxPatchBaseline]
+    Export:
+      Name: !Sub '${AWS::StackName}-PatchBaseline'
+
+  PatchScanWindowId:
+    Description: 'Maintenance window ID for patch scanning'
+    Value: !Ref PatchScanWindow
+    Export:
+      Name: !Sub '${AWS::StackName}-ScanWindow'
+
+  PatchInstallWindowId:
+    Description: 'Maintenance window ID for patch installation'
+    Value: !Ref PatchInstallWindow
+    Export:
+      Name: !Sub '${AWS::StackName}-InstallWindow'
+
+  MaintenanceWindowRoleArn:
+    Description: 'IAM role ARN for maintenance windows'
+    Value: !GetAtt MaintenanceWindowRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-MaintenanceRole' 

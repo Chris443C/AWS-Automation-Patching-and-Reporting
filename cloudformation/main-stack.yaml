@@ -1,0 +1,390 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Automation Patching and Reporting - Main Infrastructure Stack'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  S3BucketName:
+    Type: String
+    Default: 'aws-patching-automation-reports'
+    Description: 'S3 bucket name for storing reports and configurations'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for patch approval notifications'
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+Resources:
+  # S3 Bucket for Reports and Configurations
+  ReportsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${S3BucketName}-${AWS::AccountId}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldReports
+            Status: Enabled
+            ExpirationInDays: 365
+            NoncurrentVersionExpirationInDays: 30
+
+  # IAM Role for Lambda Functions
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'PatchingAutomationLambdaRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: PatchingAutomationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # S3 permissions - restricted to specific bucket
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub '${ReportsBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt ReportsBucket.Arn
+              # SSM permissions - restricted to patching operations
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                  - ssm:PutParameter
+                Resource: 
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/patching-automation/*'
+              - Effect: Allow
+                Action:
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommands
+                  - ssm:ListCommandInvocations
+                  - ssm:DescribeInstancePatchStates
+                  - ssm:DescribeInstancePatches
+                  - ssm:DescribePatchBaselines
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              # Inspector permissions - restricted to read-only operations
+              - Effect: Allow
+                Action:
+                  - inspector2:ListFindings
+                  - inspector2:GetFinding
+                  - inspector2:ListScans
+                  - inspector2:GetFindingsReportStatus
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              # SNS permissions - restricted to specific topic
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !GetAtt NotificationTopic.Arn
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub '${LambdaLogGroup.Arn}:*'
+              # Security Hub permissions - read-only for compliance monitoring
+              - Effect: Allow
+                Action:
+                  - securityhub:GetFindings
+                  - securityhub:GetInsights
+                  - securityhub:GetInsightResults
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+              # Config permissions for compliance rules
+              - Effect: Allow
+                Action:
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:GetComplianceSummaryByConfigRule
+                  - config:DescribeConfigRules
+                Resource: '*'
+                Condition:
+                  StringEquals:
+                    'aws:RequestedRegion': !Ref AWS::Region
+
+  # SNS Topic for Notifications
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'PatchingApprovalNotifications-${Environment}'
+      DisplayName: !Sub 'Patch Approval Notifications - ${Environment}'
+
+  # SNS Subscription
+  NotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref NotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # CloudWatch Log Group for Lambda Functions
+  LambdaLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/patching-automation-${Environment}'
+      RetentionInDays: 30
+
+  # KMS Key for encrypting sensitive parameters
+  ParameterEncryptionKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: !Sub 'KMS key for encrypting patching automation parameters - ${Environment}'
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: 'kms:*'
+            Resource: '*'
+          - Sid: Allow Lambda role to use the key
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt LambdaExecutionRole.Arn
+            Action:
+              - kms:Decrypt
+              - kms:GenerateDataKey
+            Resource: '*'
+
+  # KMS Key Alias
+  ParameterEncryptionKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/patching-automation-${Environment}'
+      TargetKeyId: !Ref ParameterEncryptionKey
+
+  # Systems Manager Parameter Store Parameters (Encrypted)
+  PatchConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/patching-automation/${Environment}/patch-config'
+      Type: SecureString
+      KeyId: !Ref ParameterEncryptionKey
+      Value: !Sub |
+        {
+          "autoApprovalThreshold": 8.0,
+          "patchClassifications": ["SecurityUpdates", "CriticalUpdates"],
+          "approvalWorkflow": "manual",
+          "scanSchedule": "cron(0 2 * * ? *)",
+          "installSchedule": "cron(0 4 * * ? *)",
+          "maxConcurrency": 10,
+          "maxErrors": 2,
+          "severityThresholds": {
+            "critical": 10.0,
+            "important": 7.0,
+            "moderate": 5.0,
+            "low": 2.0
+          }
+        }
+      Description: 'Encrypted patch automation configuration'
+
+  # Notification configuration parameter (encrypted)
+  NotificationConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/patching-automation/${Environment}/notification-config'
+      Type: SecureString
+      KeyId: !Ref ParameterEncryptionKey
+      Value: !Sub |
+        {
+          "email": {
+            "recipients": ["${NotificationEmail}"],
+            "enabled": true
+          },
+          "sns": {
+            "topicArn": "${NotificationTopic}",
+            "enabled": true
+          }
+        }
+      Description: 'Encrypted notification configuration'
+
+  # EventBridge Rule for Scheduled Scans
+  ScheduledScanRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'PatchingScheduledScan-${Environment}'
+      Description: 'Trigger patch scanning on schedule'
+      ScheduleExpression: cron(0 2 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScheduledScanFunction.Arn
+          Id: ScheduledScanTarget
+
+  # EventBridge Rule for Patch Installation
+  ScheduledInstallRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'PatchingScheduledInstall-${Environment}'
+      Description: 'Trigger patch installation on schedule'
+      ScheduleExpression: cron(0 4 * * ? *)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ScheduledInstallFunction.Arn
+          Id: ScheduledInstallTarget
+
+  # Lambda Permission for EventBridge
+  ScheduledScanPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScheduledScanFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledScanRule.Arn
+
+  ScheduledInstallPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ScheduledInstallFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledInstallRule.Arn
+
+  # Lambda Functions (placeholder - will be created in separate files)
+  ScheduledScanFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'PatchingScheduledScan-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          def handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Scheduled scan triggered')
+              }
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !Ref ReportsBucket
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+
+  ScheduledInstallFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'PatchingScheduledInstall-${Environment}'
+      Runtime: python3.11
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          
+          def handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Scheduled install triggered')
+              }
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !Ref ReportsBucket
+          SNS_TOPIC_ARN: !Ref NotificationTopic
+
+  # CloudWatch Dashboard
+  PatchingDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'PatchingAutomation-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Lambda", "Invocations", "FunctionName", "${ScheduledScanFunction}"],
+                  [".", "Errors", ".", "."],
+                  [".", "Duration", ".", "."]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Function Metrics"
+              }
+            },
+            {
+              "type": "log",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '${LambdaLogGroup}'\n| fields @timestamp, @message\n| sort @timestamp desc\n| limit 100",
+                "region": "${AWS::Region}",
+                "title": "Patching Automation Logs"
+              }
+            }
+          ]
+        }
+
+Outputs:
+  ReportsBucketName:
+    Description: 'S3 bucket for storing reports and configurations'
+    Value: !Ref ReportsBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ReportsBucket'
+
+  NotificationTopicArn:
+    Description: 'SNS topic for patch approval notifications'
+    Value: !Ref NotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-NotificationTopic'
+
+  LambdaExecutionRoleArn:
+    Description: 'IAM role for Lambda functions'
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-LambdaRole'
+
+  Environment:
+    Description: 'Environment name'
+    Value: !Ref Environment
+    Export:
+      Name: !Sub '${AWS::StackName}-Environment' 

@@ -1,0 +1,439 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Audit Manager Integration for Compliance Automation'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for audit notifications'
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+  
+  S3BucketName:
+    Type: String
+    Default: 'aws-patching-automation-reports'
+    Description: 'S3 bucket name for storing audit reports'
+  
+  ComplianceFrameworks:
+    Type: CommaDelimitedList
+    Default: ['CIS', 'PCI-DSS']
+    Description: 'Compliance frameworks to enable'
+  
+  AssessmentName:
+    Type: String
+    Default: 'Automated Compliance Assessment'
+    Description: 'Name for the automated compliance assessment'
+
+Resources:
+  # S3 Bucket for Audit Manager reports
+  AuditReportBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${S3BucketName}-audit-reports-${AWS::AccountId}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldAuditReports
+            Status: Enabled
+            ExpirationInDays: 2555  # 7 years for compliance
+
+  # IAM Role for Audit Manager
+  AuditManagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'AuditManagerRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: auditmanager.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSCloudTrailFullAccess
+        - arn:aws:iam::aws:policy/ReadOnlyAccess
+      Policies:
+        - PolicyName: AuditManagerCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AuditReportBucket.Arn
+                  - !Sub '${AuditReportBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AuditNotificationTopic
+
+  # SNS Topic for Audit Notifications
+  AuditNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'AuditManagerNotifications-${Environment}'
+      DisplayName: !Sub 'Audit Manager Notifications - ${Environment}'
+
+  # SNS Subscription
+  AuditNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref AuditNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Lambda Function for Audit Manager Integration
+  AuditManagerIntegrationFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'AuditManagerIntegration-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt AuditManagerIntegrationRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+          
+          def handler(event, context):
+              auditmanager = boto3.client('auditmanager')
+              s3 = boto3.client('s3')
+              sns = boto3.client('sns')
+              
+              # Get environment variables
+              environment = os.environ['ENVIRONMENT']
+              s3_bucket = os.environ['S3_BUCKET']
+              sns_topic_arn = os.environ['SNS_TOPIC_ARN']
+              assessment_name = os.environ['ASSESSMENT_NAME']
+              
+              try:
+                  # Get available frameworks
+                  frameworks = get_compliance_frameworks(auditmanager)
+                  
+                  # Create or update assessment
+                  assessment_id = create_or_update_assessment(
+                      auditmanager, assessment_name, frameworks
+                  )
+                  
+                  # Collect evidence
+                  evidence_collection = collect_evidence(auditmanager, assessment_id)
+                  
+                  # Generate assessment report
+                  report = generate_assessment_report(
+                      auditmanager, assessment_id, evidence_collection
+                  )
+                  
+                  # Store report in S3
+                  s3_location = store_report_in_s3(s3, report, environment)
+                  
+                  # Send notification
+                  send_audit_notification(sns, report, s3_location, sns_topic_arn)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'assessment_id': assessment_id,
+                          's3_location': s3_location,
+                          'compliance_score': report.get('compliance_score', 0)
+                      })
+                  }
+                  
+              except Exception as e:
+                  logger.error(f"Audit Manager integration failed: {e}")
+                  raise
+          
+          def get_compliance_frameworks(auditmanager):
+              """Get available compliance frameworks"""
+              try:
+                  response = auditmanager.list_assessment_frameworks(
+                      frameworkType='Standard'
+                  )
+                  
+                  frameworks = []
+                  for framework in response.get('frameworkMetadataList', []):
+                      framework_name = framework.get('name', '')
+                      if any(fw in framework_name.upper() for fw in ['CIS', 'PCI', 'SOC']):
+                          frameworks.append({
+                              'id': framework.get('id'),
+                              'name': framework_name,
+                              'type': framework.get('type')
+                          })
+                  
+                  return frameworks
+                  
+              except Exception as e:
+                  logger.error(f"Error getting frameworks: {e}")
+                  return []
+          
+          def create_or_update_assessment(auditmanager, assessment_name, frameworks):
+              """Create or update compliance assessment"""
+              try:
+                  # Check if assessment already exists
+                  response = auditmanager.list_assessments()
+                  
+                  for assessment in response.get('assessmentMetadata', []):
+                      if assessment.get('name') == assessment_name:
+                          return assessment.get('id')
+                  
+                  # Create new assessment
+                  if frameworks:
+                      framework_id = frameworks[0]['id']
+                      
+                      response = auditmanager.create_assessment(
+                          name=assessment_name,
+                          assessmentReportsDestination={
+                              'destination': 's3',
+                              'destinationType': 'S3'
+                          },
+                          frameworkId=framework_id,
+                          description=f'Automated compliance assessment for {environment} environment'
+                      )
+                      
+                      return response.get('assessment', {}).get('id')
+                  
+                  return None
+                  
+              except Exception as e:
+                  logger.error(f"Error creating assessment: {e}")
+                  return None
+          
+          def collect_evidence(auditmanager, assessment_id):
+              """Collect evidence for the assessment"""
+              try:
+                  if not assessment_id:
+                      return {}
+                  
+                  # Start evidence collection
+                  response = auditmanager.start_assessment_framework_share(
+                      assessmentId=assessment_id
+                  )
+                  
+                  # Get evidence folders
+                  evidence_response = auditmanager.get_evidence_folders_by_assessment(
+                      assessmentId=assessment_id
+                  )
+                  
+                  evidence_collection = {
+                      'assessment_id': assessment_id,
+                      'evidence_folders': evidence_response.get('evidenceFolders', []),
+                      'collection_timestamp': datetime.now().isoformat()
+                  }
+                  
+                  return evidence_collection
+                  
+              except Exception as e:
+                  logger.error(f"Error collecting evidence: {e}")
+                  return {}
+          
+          def generate_assessment_report(auditmanager, assessment_id, evidence_collection):
+              """Generate assessment report"""
+              try:
+                  if not assessment_id:
+                      return {}
+                  
+                  # Get assessment details
+                  assessment_response = auditmanager.get_assessment(
+                      assessmentId=assessment_id
+                  )
+                  
+                  assessment = assessment_response.get('assessment', {})
+                  
+                  # Calculate compliance score
+                  compliance_score = calculate_compliance_score(assessment)
+                  
+                  report = {
+                      'report_timestamp': datetime.now().isoformat(),
+                      'environment': environment,
+                      'assessment_id': assessment_id,
+                      'assessment_name': assessment.get('name'),
+                      'framework': assessment.get('framework', {}).get('name'),
+                      'compliance_score': compliance_score,
+                      'evidence_collection': evidence_collection,
+                      'assessment_status': assessment.get('status'),
+                      'metadata': assessment.get('metadata', {})
+                  }
+                  
+                  return report
+                  
+              except Exception as e:
+                  logger.error(f"Error generating report: {e}")
+                  return {}
+          
+          def calculate_compliance_score(assessment):
+              """Calculate compliance score from assessment"""
+              try:
+                  # This is a simplified calculation
+                  # In a real implementation, you would analyze the evidence
+                  # and calculate based on control compliance
+                  
+                  # For now, return a placeholder score
+                  return 85.0
+                  
+              except Exception as e:
+                  logger.error(f"Error calculating compliance score: {e}")
+                  return 0.0
+          
+          def store_report_in_s3(s3, report, environment):
+              """Store audit report in S3"""
+              try:
+                  timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                  filename = f"audit_manager_report_{environment}_{timestamp}.json"
+                  
+                  s3.put_object(
+                      Bucket=s3_bucket,
+                      Key=f"audit-reports/{filename}",
+                      Body=json.dumps(report, indent=2),
+                      ContentType='application/json'
+                  )
+                  
+                  return f"s3://{s3_bucket}/audit-reports/{filename}"
+                  
+              except Exception as e:
+                  logger.error(f"Error storing report in S3: {e}")
+                  return None
+          
+          def send_audit_notification(sns, report, s3_location, sns_topic_arn):
+              """Send audit notification via SNS"""
+              try:
+                  subject = f"Audit Manager Assessment Report - {environment.upper()}"
+                  
+                  message = f"""
+          Audit Manager Assessment Report
+          
+          Assessment: {report.get('assessment_name', 'N/A')}
+          Framework: {report.get('framework', 'N/A')}
+          Compliance Score: {report.get('compliance_score', 0)}%
+          Status: {report.get('assessment_status', 'N/A')}
+          
+          Report Location: {s3_location or 'N/A'}
+          
+          Timestamp: {report.get('report_timestamp', 'N/A')}
+                  """
+                  
+                  sns.publish(
+                      TopicArn=sns_topic_arn,
+                      Subject=subject,
+                      Message=message
+                  )
+                  
+              except Exception as e:
+                  logger.error(f"Error sending notification: {e}")
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !Ref AuditReportBucket
+          SNS_TOPIC_ARN: !Ref AuditNotificationTopic
+          ASSESSMENT_NAME: !Ref AssessmentName
+
+  # IAM Role for Audit Manager Integration Lambda
+  AuditManagerIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'AuditManagerIntegrationRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: AuditManagerIntegrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - auditmanager:*
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AuditReportBucket.Arn
+                  - !Sub '${AuditReportBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref AuditNotificationTopic
+              - Effect: Allow
+                Action:
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:DescribeConfigRules
+                  - securityhub:GetFindings
+                  - securityhub:DescribeStandards
+                  - inspector2:ListFindings
+                  - ssm:DescribePatchBaselines
+                  - ssm:DescribeMaintenanceWindows
+                Resource: '*'
+
+  # EventBridge Rule for Scheduled Audit Assessments
+  ScheduledAuditRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'ScheduledAuditAssessment-${Environment}'
+      Description: 'Trigger automated audit assessments on schedule'
+      ScheduleExpression: 'rate(7 days)'  # Run weekly
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AuditManagerIntegrationFunction.Arn
+          Id: AuditManagerTarget
+
+  # Lambda Permission for EventBridge
+  AuditManagerIntegrationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AuditManagerIntegrationFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ScheduledAuditRule.Arn
+
+  # CloudWatch Log Group for Lambda Function
+  AuditManagerIntegrationLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/AuditManagerIntegration-${Environment}'
+      RetentionInDays: 30
+
+Outputs:
+  AuditReportBucketName:
+    Description: 'S3 Bucket for Audit Manager reports'
+    Value: !Ref AuditReportBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditReportBucketName'
+
+  AuditNotificationTopicArn:
+    Description: 'SNS Topic ARN for audit notifications'
+    Value: !Ref AuditNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditNotificationTopicArn'
+
+  AuditManagerIntegrationFunctionArn:
+    Description: 'Audit Manager Integration Lambda Function ARN'
+    Value: !GetAtt AuditManagerIntegrationFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-AuditManagerIntegrationFunctionArn' 

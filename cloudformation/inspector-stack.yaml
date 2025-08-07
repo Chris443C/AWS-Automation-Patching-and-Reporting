@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Inspector Configuration for Patching Automation'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  EnableEC2Scanning:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable EC2 instance scanning'
+  
+  EnableECRScanning:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable ECR container scanning'
+  
+  EnableLambdaScanning:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable Lambda function scanning'
+
+Resources:
+  # AWS Inspector Delegated Admin Account (if needed)
+  InspectorDelegatedAdmin:
+    Type: AWS::Inspector2::DelegatedAdminAccount
+    Properties:
+      DelegatedAdminAccountId: !Ref AWS::AccountId
+
+  # AWS Inspector Organization Configuration
+  InspectorOrgConfig:
+    Type: AWS::Inspector2::OrganizationConfiguration
+    Properties:
+      AutoEnable:
+        Ec2: !If [EnableEC2, true, false]
+        Ecr: !If [EnableECR, true, false]
+        Lambda: !If [EnableLambda, true, false]
+
+  # IAM Role for Inspector Integration
+  InspectorIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'InspectorIntegrationRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: inspector2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonInspector2FullAccess
+      Policies:
+        - PolicyName: InspectorIntegrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - inspector2:*
+                  - ssm:SendCommand
+                  - ssm:GetCommandInvocation
+                  - ssm:ListCommands
+                  - ssm:ListCommandInvocations
+                Resource: '*'
+
+  # EventBridge Rule for Inspector Findings
+  InspectorFindingsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'InspectorFindings-${Environment}'
+      Description: 'Capture AWS Inspector findings for processing'
+      EventPattern:
+        source:
+          - aws.inspector2
+        detail-type:
+          - Inspector2 Finding
+        detail:
+          severity:
+            - CRITICAL
+            - HIGH
+            - MEDIUM
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt InspectorFindingsProcessor.Arn
+          Id: InspectorFindingsTarget
+
+  # Lambda Function to Process Inspector Findings
+  InspectorFindingsProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'InspectorFindingsProcessor-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !Sub 'arn:aws:iam::${AWS::AccountId}:role/PatchingAutomationLambdaRole-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              inspector = boto3.client('inspector2')
+              s3 = boto3.client('s3')
+              sns = boto3.client('sns')
+              
+              findings = []
+              
+              for record in event['Records']:
+                  finding_detail = record['detail']
+                  findings.append({
+                      'findingArn': finding_detail.get('findingArn'),
+                      'severity': finding_detail.get('severity'),
+                      'title': finding_detail.get('title'),
+                      'description': finding_detail.get('description'),
+                      'cvssScore': finding_detail.get('cvssScore'),
+                      'packageVulnerabilityDetails': finding_detail.get('packageVulnerabilityDetails'),
+                      'timestamp': datetime.now().isoformat()
+                  })
+              
+              # Store findings in S3
+              bucket_name = os.environ['S3_BUCKET']
+              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+              key = f'inspector-findings/{timestamp}_findings.json'
+              
+              s3.put_object(
+                  Bucket=bucket_name,
+                  Key=key,
+                  Body=json.dumps(findings, indent=2),
+                  ContentType='application/json'
+              )
+              
+              # Send notification for critical findings
+              critical_findings = [f for f in findings if f['severity'] == 'CRITICAL']
+              if critical_findings:
+                  message = f"Critical vulnerabilities found: {len(critical_findings)}"
+                  sns.publish(
+                      TopicArn=os.environ['SNS_TOPIC_ARN'],
+                      Subject='Critical Security Vulnerabilities Detected',
+                      Message=message
+                  )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps(f'Processed {len(findings)} findings')
+              }
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !ImportValue 
+            'Fn::Sub': '${AWS::StackName:aws-patching-automation}-ReportsBucket'
+          SNS_TOPIC_ARN: !ImportValue 
+            'Fn::Sub': '${AWS::StackName:aws-patching-automation}-NotificationTopic'
+
+  # Lambda Permission for EventBridge
+  InspectorFindingsPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref InspectorFindingsProcessor
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt InspectorFindingsRule.Arn
+
+  # CloudWatch Log Group for Inspector Processing
+  InspectorLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/InspectorFindingsProcessor-${Environment}'
+      RetentionInDays: 30
+
+  # Systems Manager Parameter for Inspector Configuration
+  InspectorConfigParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub '/inspector/${Environment}/config'
+      Type: String
+      Value: !Sub |
+        {
+          "scanSchedule": "cron(0 */6 * * ? *)",
+          "severityThreshold": "MEDIUM",
+          "autoRemediation": false,
+          "notificationChannels": ["sns", "s3"]
+        }
+      Description: 'AWS Inspector configuration'
+
+  # CloudWatch Dashboard for Inspector
+  InspectorDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'InspectorMonitoring-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Inspector2", "Findings", "Severity", "CRITICAL"],
+                  [".", ".", ".", "HIGH"],
+                  [".", ".", ".", "MEDIUM"],
+                  [".", ".", ".", "LOW"]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Inspector Findings by Severity"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  ["AWS/Inspector2", "Scans", "Status", "COMPLETED"],
+                  [".", ".", ".", "FAILED"],
+                  [".", ".", ".", "IN_PROGRESS"]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Inspector Scan Status"
+              }
+            }
+          ]
+        }
+
+Conditions:
+  EnableEC2: !Equals [!Ref EnableEC2Scanning, 'true']
+  EnableECR: !Equals [!Ref EnableECRScanning, 'true']
+  EnableLambda: !Equals [!Ref EnableLambdaScanning, 'true']
+
+Outputs:
+  InspectorFindingsProcessorArn:
+    Description: 'Lambda function ARN for processing Inspector findings'
+    Value: !GetAtt InspectorFindingsProcessor.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InspectorProcessor'
+
+  InspectorIntegrationRoleArn:
+    Description: 'IAM role ARN for Inspector integration'
+    Value: !GetAtt InspectorIntegrationRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InspectorRole'
+
+  InspectorFindingsRuleArn:
+    Description: 'EventBridge rule ARN for Inspector findings'
+    Value: !GetAtt InspectorFindingsRule.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-InspectorRule' 

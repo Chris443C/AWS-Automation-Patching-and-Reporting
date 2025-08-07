@@ -1,0 +1,839 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Step Functions workflows for microservices orchestration'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  EventBusName:
+    Type: String
+    Description: 'Name of the EventBridge custom bus'
+  
+  ComplianceScannerFunctionArn:
+    Type: String
+    Description: 'ARN of the compliance scanner microservice'
+  
+  VulnerabilityScannerFunctionArn:
+    Type: String
+    Description: 'ARN of the vulnerability scanner microservice'
+  
+  PatchApproverFunctionArn:
+    Type: String
+    Description: 'ARN of the patch approver microservice'
+  
+  NotificationServiceFunctionArn:
+    Type: String
+    Description: 'ARN of the notification service microservice'
+
+Resources:
+  # IAM Role for Step Functions execution
+  StepFunctionsExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'StepFunctionsExecutionRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: states.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StepFunctionsExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              # Lambda function invocation permissions
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - !Ref ComplianceScannerFunctionArn
+                  - !Ref VulnerabilityScannerFunctionArn
+                  - !Ref PatchApproverFunctionArn
+                  - !Ref NotificationServiceFunctionArn
+              # EventBridge permissions
+              - Effect: Allow
+                Action:
+                  - events:PutEvents
+                Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/${EventBusName}'
+              # CloudWatch Logs permissions
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogDelivery
+                  - logs:GetLogDelivery
+                  - logs:UpdateLogDelivery
+                  - logs:DeleteLogDelivery
+                  - logs:ListLogDeliveries
+                  - logs:PutResourcePolicy
+                  - logs:DescribeResourcePolicies
+                  - logs:DescribeLogGroups
+                Resource: '*'
+              # X-Ray permissions
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: '*'
+
+  # CloudWatch Log Groups for Step Functions
+  PatchApprovalWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/patch-approval-workflow-${Environment}'
+      RetentionInDays: 30
+
+  ComplianceRemediationWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/compliance-remediation-workflow-${Environment}'
+      RetentionInDays: 30
+
+  PatchInstallationWorkflowLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/stepfunctions/patch-installation-workflow-${Environment}'
+      RetentionInDays: 30
+
+  # Patch Approval Workflow
+  PatchApprovalWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'patch-approval-workflow-${Environment}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      TracingConfiguration:
+        Enabled: true
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt PatchApprovalWorkflowLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Patch approval workflow with vulnerability correlation and risk assessment",
+          "StartAt": "ValidateInput",
+          "States": {
+            "ValidateInput": {
+              "Type": "Pass",
+              "Parameters": {
+                "correlation_id.$": "$.correlation_id",
+                "event_type.$": "$.detail-type",
+                "vulnerability_data.$": "$.detail",
+                "timestamp.$": "$$.Execution.StartTime"
+              },
+              "Next": "ScanVulnerabilities"
+            },
+            "ScanVulnerabilities": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${VulnerabilityScannerFunctionArn}",
+                "Payload": {
+                  "scanType": "targeted",
+                  "daysBack": 1,
+                  "includeInspector": true,
+                  "includePatches": true,
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "ResultPath": "$.vulnerability_scan_result",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "HandleScanFailure",
+                  "ResultPath": "$.scan_error"
+                }
+              ],
+              "Next": "EvaluateVulnerabilities"
+            },
+            "EvaluateVulnerabilities": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.vulnerability_scan_result.Payload.critical_vulnerabilities",
+                  "NumericGreaterThan": 0,
+                  "Next": "ProcessCriticalVulnerabilities"
+                },
+                {
+                  "Variable": "$.vulnerability_scan_result.Payload.high_vulnerabilities",
+                  "NumericGreaterThan": 5,
+                  "Next": "ProcessHighVulnerabilities"
+                }
+              ],
+              "Default": "ProcessStandardVulnerabilities"
+            },
+            "ProcessCriticalVulnerabilities": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "AutoApproveCriticalPatches",
+                  "States": {
+                    "AutoApproveCriticalPatches": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${PatchApproverFunctionArn}",
+                        "Payload": {
+                          "approval_mode": "automatic",
+                          "severity_filter": ["CRITICAL"],
+                          "correlation_id.$": "$.correlation_id",
+                          "vulnerability_data.$": "$.vulnerability_scan_result.Payload"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "SendUrgentNotification",
+                  "States": {
+                    "SendUrgentNotification": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${NotificationServiceFunctionArn}",
+                        "Payload": {
+                          "notification_type": "urgent",
+                          "severity": "CRITICAL",
+                          "correlation_id.$": "$.correlation_id",
+                          "vulnerability_count.$": "$.vulnerability_scan_result.Payload.critical_vulnerabilities"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "ResultPath": "$.critical_processing_result",
+              "Next": "PublishApprovalEvents"
+            },
+            "ProcessHighVulnerabilities": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${PatchApproverFunctionArn}",
+                "Payload": {
+                  "approval_mode": "review",
+                  "severity_filter": ["HIGH", "CRITICAL"],
+                  "correlation_id.$": "$.correlation_id",
+                  "vulnerability_data.$": "$.vulnerability_scan_result.Payload"
+                }
+              },
+              "ResultPath": "$.patch_approval_result",
+              "TimeoutSeconds": 300,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Next": "WaitForManualApproval"
+            },
+            "ProcessStandardVulnerabilities": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${PatchApproverFunctionArn}",
+                "Payload": {
+                  "approval_mode": "standard",
+                  "correlation_id.$": "$.correlation_id",
+                  "vulnerability_data.$": "$.vulnerability_scan_result.Payload"
+                }
+              },
+              "ResultPath": "$.patch_approval_result",
+              "TimeoutSeconds": 300,
+              "Next": "PublishApprovalEvents"
+            },
+            "WaitForManualApproval": {
+              "Type": "Wait",
+              "Seconds": 3600,
+              "Comment": "Wait 1 hour for manual approval",
+              "Next": "CheckApprovalStatus"
+            },
+            "CheckApprovalStatus": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${PatchApproverFunctionArn}",
+                "Payload": {
+                  "action": "check_approval_status",
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "ResultPath": "$.approval_status",
+              "Next": "EvaluateApprovalStatus"
+            },
+            "EvaluateApprovalStatus": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.approval_status.Payload.status",
+                  "StringEquals": "approved",
+                  "Next": "PublishApprovalEvents"
+                },
+                {
+                  "Variable": "$.approval_status.Payload.status",
+                  "StringEquals": "rejected",
+                  "Next": "HandleRejection"
+                }
+              ],
+              "Default": "WaitForManualApproval"
+            },
+            "PublishApprovalEvents": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "patching-automation.patch-approval-workflow",
+                    "DetailType": "Patch Approval Completed",
+                    "Detail": {
+                      "correlation_id.$": "$.correlation_id",
+                      "environment": "${Environment}",
+                      "status": "approved",
+                      "vulnerability_count.$": "$.vulnerability_scan_result.Payload.vulnerabilities_count",
+                      "patches_approved.$": "$.patch_approval_result.Payload.approved_patches",
+                      "timestamp.$": "$$.State.EnteredTime"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "Next": "WorkflowSuccess"
+            },
+            "HandleRejection": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "patching-automation.patch-approval-workflow",
+                    "DetailType": "Patch Approval Rejected",
+                    "Detail": {
+                      "correlation_id.$": "$.correlation_id",
+                      "environment": "${Environment}",
+                      "status": "rejected",
+                      "reason.$": "$.approval_status.Payload.rejection_reason",
+                      "timestamp.$": "$$.State.EnteredTime"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "Next": "WorkflowComplete"
+            },
+            "HandleScanFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NotificationServiceFunctionArn}",
+                "Payload": {
+                  "notification_type": "error",
+                  "error_message.$": "$.scan_error.Cause",
+                  "correlation_id.$": "$.correlation_id",
+                  "workflow": "patch-approval"
+                }
+              },
+              "Next": "WorkflowFailed"
+            },
+            "WorkflowSuccess": {
+              "Type": "Succeed",
+              "Comment": "Patch approval workflow completed successfully"
+            },
+            "WorkflowComplete": {
+              "Type": "Succeed",
+              "Comment": "Patch approval workflow completed"
+            },
+            "WorkflowFailed": {
+              "Type": "Fail",
+              "Comment": "Patch approval workflow failed"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Workflow
+          Value: 'patch-approval'
+
+  # Compliance Remediation Workflow
+  ComplianceRemediationWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'compliance-remediation-workflow-${Environment}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      TracingConfiguration:
+        Enabled: true
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt ComplianceRemediationWorkflowLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Compliance remediation workflow with automated and manual remediation steps",
+          "StartAt": "AnalyzeCompliance",
+          "States": {
+            "AnalyzeCompliance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ComplianceScannerFunctionArn}",
+                "Payload": {
+                  "scanType": "targeted",
+                  "frameworks": ["CIS", "PCI_DSS", "SOC2"],
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "ResultPath": "$.compliance_analysis",
+              "TimeoutSeconds": 900,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException", "Lambda.AWSLambdaException"],
+                  "IntervalSeconds": 5,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "Next": "EvaluateComplianceViolations"
+            },
+            "EvaluateComplianceViolations": {
+              "Type": "Choice",
+              "Choices": [
+                {
+                  "Variable": "$.compliance_analysis.Payload.compliance_score",
+                  "NumericLessThan": 60,
+                  "Next": "InitiateCriticalRemediation"
+                },
+                {
+                  "Variable": "$.compliance_analysis.Payload.compliance_score",
+                  "NumericLessThan": 80,
+                  "Next": "InitiateStandardRemediation"
+                }
+              ],
+              "Default": "MonitorCompliance"
+            },
+            "InitiateCriticalRemediation": {
+              "Type": "Parallel",
+              "Branches": [
+                {
+                  "StartAt": "AutoRemediation",
+                  "States": {
+                    "AutoRemediation": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${PatchApproverFunctionArn}",
+                        "Payload": {
+                          "action": "auto_remediate",
+                          "violations.$": "$.compliance_analysis.Payload.violations",
+                          "correlation_id.$": "$.correlation_id"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                },
+                {
+                  "StartAt": "EscalateToSecurityTeam",
+                  "States": {
+                    "EscalateToSecurityTeam": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::lambda:invoke",
+                      "Parameters": {
+                        "FunctionName": "${NotificationServiceFunctionArn}",
+                        "Payload": {
+                          "notification_type": "escalation",
+                          "severity": "CRITICAL",
+                          "compliance_score.$": "$.compliance_analysis.Payload.compliance_score",
+                          "correlation_id.$": "$.correlation_id"
+                        }
+                      },
+                      "End": true
+                    }
+                  }
+                }
+              ],
+              "ResultPath": "$.remediation_result",
+              "Next": "ScheduleReassessment"
+            },
+            "InitiateStandardRemediation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${PatchApproverFunctionArn}",
+                "Payload": {
+                  "action": "standard_remediate",
+                  "violations.$": "$.compliance_analysis.Payload.violations",
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "ResultPath": "$.remediation_result",
+              "TimeoutSeconds": 1800,
+              "Next": "ScheduleReassessment"
+            },
+            "MonitorCompliance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "patching-automation.compliance-remediation",
+                    "DetailType": "Compliance Monitoring",
+                    "Detail": {
+                      "correlation_id.$": "$.correlation_id",
+                      "environment": "${Environment}",
+                      "compliance_score.$": "$.compliance_analysis.Payload.compliance_score",
+                      "status": "monitoring",
+                      "timestamp.$": "$$.State.EnteredTime"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "Next": "WorkflowSuccess"
+            },
+            "ScheduleReassessment": {
+              "Type": "Wait",
+              "Seconds": 7200,
+              "Comment": "Wait 2 hours before reassessment",
+              "Next": "ReassessCompliance"
+            },
+            "ReassessCompliance": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${ComplianceScannerFunctionArn}",
+                "Payload": {
+                  "scanType": "reassessment",
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "ResultPath": "$.reassessment_result",
+              "TimeoutSeconds": 900,
+              "Next": "PublishRemediationResults"
+            },
+            "PublishRemediationResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "patching-automation.compliance-remediation",
+                    "DetailType": "Compliance Remediation Completed",
+                    "Detail": {
+                      "correlation_id.$": "$.correlation_id",
+                      "environment": "${Environment}",
+                      "initial_score.$": "$.compliance_analysis.Payload.compliance_score",
+                      "final_score.$": "$.reassessment_result.Payload.compliance_score",
+                      "improvement.$": "States.MathAdd($.reassessment_result.Payload.compliance_score, States.MathMultiply($.compliance_analysis.Payload.compliance_score, -1))",
+                      "timestamp.$": "$$.State.EnteredTime"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "Next": "WorkflowSuccess"
+            },
+            "WorkflowSuccess": {
+              "Type": "Succeed",
+              "Comment": "Compliance remediation workflow completed successfully"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Workflow
+          Value: 'compliance-remediation'
+
+  # Patch Installation Workflow
+  PatchInstallationWorkflow:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub 'patch-installation-workflow-${Environment}'
+      StateMachineType: STANDARD
+      RoleArn: !GetAtt StepFunctionsExecutionRole.Arn
+      TracingConfiguration:
+        Enabled: true
+      LoggingConfiguration:
+        Level: ALL
+        IncludeExecutionData: true
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt PatchInstallationWorkflowLogGroup.Arn
+      DefinitionString: !Sub |
+        {
+          "Comment": "Patch installation workflow with rollback capabilities and monitoring",
+          "StartAt": "ValidateApprovedPatches",
+          "States": {
+            "ValidateApprovedPatches": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${PatchApproverFunctionArn}",
+                "Payload": {
+                  "action": "validate_approved_patches",
+                  "correlation_id.$": "$.correlation_id",
+                  "approved_patches.$": "$.detail.approved_patches"
+                }
+              },
+              "ResultPath": "$.validation_result",
+              "TimeoutSeconds": 300,
+              "Retry": [
+                {
+                  "ErrorEquals": ["Lambda.ServiceException"],
+                  "IntervalSeconds": 3,
+                  "MaxAttempts": 2
+                }
+              ],
+              "Next": "CreateInstallationPlan"
+            },
+            "CreateInstallationPlan": {
+              "Type": "Pass",
+              "Parameters": {
+                "correlation_id.$": "$.correlation_id",
+                "installation_batches.$": "States.ArrayPartition($.validation_result.Payload.validated_patches, 5)",
+                "rollback_plan": {
+                  "enabled": true,
+                  "snapshot_required": true,
+                  "validation_tests": ["service_health", "application_health"]
+                }
+              },
+              "ResultPath": "$.installation_plan",
+              "Next": "ProcessInstallationBatches"
+            },
+            "ProcessInstallationBatches": {
+              "Type": "Map",
+              "ItemsPath": "$.installation_plan.installation_batches",
+              "Parameters": {
+                "batch.$": "$$.Map.Item.Value",
+                "correlation_id.$": "$.correlation_id",
+                "rollback_plan.$": "$.installation_plan.rollback_plan"
+              },
+              "MaxConcurrency": 2,
+              "Iterator": {
+                "StartAt": "CreateSnapshot",
+                "States": {
+                  "CreateSnapshot": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${PatchApproverFunctionArn}",
+                      "Payload": {
+                        "action": "create_snapshot",
+                        "instances.$": "$.batch[*].instance_id",
+                        "correlation_id.$": "$.correlation_id"
+                      }
+                    },
+                    "ResultPath": "$.snapshot_result",
+                    "TimeoutSeconds": 1800,
+                    "Next": "InstallPatches"
+                  },
+                  "InstallPatches": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${PatchApproverFunctionArn}",
+                      "Payload": {
+                        "action": "install_patches",
+                        "patches.$": "$.batch",
+                        "correlation_id.$": "$.correlation_id"
+                      }
+                    },
+                    "ResultPath": "$.installation_result",
+                    "TimeoutSeconds": 3600,
+                    "Catch": [
+                      {
+                        "ErrorEquals": ["States.ALL"],
+                        "Next": "RollbackInstallation",
+                        "ResultPath": "$.installation_error"
+                      }
+                    ],
+                    "Next": "ValidateInstallation"
+                  },
+                  "ValidateInstallation": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${PatchApproverFunctionArn}",
+                      "Payload": {
+                        "action": "validate_installation",
+                        "instances.$": "$.batch[*].instance_id",
+                        "validation_tests.$": "$.rollback_plan.validation_tests",
+                        "correlation_id.$": "$.correlation_id"
+                      }
+                    },
+                    "ResultPath": "$.validation_result",
+                    "TimeoutSeconds": 900,
+                    "Next": "EvaluateInstallationSuccess"
+                  },
+                  "EvaluateInstallationSuccess": {
+                    "Type": "Choice",
+                    "Choices": [
+                      {
+                        "Variable": "$.validation_result.Payload.success_rate",
+                        "NumericGreaterThanEquals": 0.8,
+                        "Next": "InstallationSuccess"
+                      }
+                    ],
+                    "Default": "RollbackInstallation"
+                  },
+                  "RollbackInstallation": {
+                    "Type": "Task",
+                    "Resource": "arn:aws:states:::lambda:invoke",
+                    "Parameters": {
+                      "FunctionName": "${PatchApproverFunctionArn}",
+                      "Payload": {
+                        "action": "rollback_installation",
+                        "snapshot_id.$": "$.snapshot_result.Payload.snapshot_id",
+                        "instances.$": "$.batch[*].instance_id",
+                        "correlation_id.$": "$.correlation_id"
+                      }
+                    },
+                    "TimeoutSeconds": 1800,
+                    "Next": "InstallationFailed"
+                  },
+                  "InstallationSuccess": {
+                    "Type": "Succeed",
+                    "Comment": "Batch installation completed successfully"
+                  },
+                  "InstallationFailed": {
+                    "Type": "Fail",
+                    "Comment": "Batch installation failed and was rolled back"
+                  }
+                }
+              },
+              "ResultPath": "$.batch_results",
+              "Catch": [
+                {
+                  "ErrorEquals": ["States.ALL"],
+                  "Next": "HandleInstallationFailure",
+                  "ResultPath": "$.workflow_error"
+                }
+              ],
+              "Next": "CompileInstallationResults"
+            },
+            "CompileInstallationResults": {
+              "Type": "Pass",
+              "Parameters": {
+                "correlation_id.$": "$.correlation_id",
+                "total_batches.$": "States.ArrayLength($.batch_results)",
+                "successful_batches.$": "States.ArrayLength($.batch_results[?(@.ExecutionStatus == 'SUCCEEDED')])",
+                "failed_batches.$": "States.ArrayLength($.batch_results[?(@.ExecutionStatus == 'FAILED')])",
+                "overall_success_rate.$": "States.MathDivide(States.ArrayLength($.batch_results[?(@.ExecutionStatus == 'SUCCEEDED')]), States.ArrayLength($.batch_results))"
+              },
+              "ResultPath": "$.final_results",
+              "Next": "PublishInstallationResults"
+            },
+            "PublishInstallationResults": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::events:putEvents",
+              "Parameters": {
+                "Entries": [
+                  {
+                    "Source": "patching-automation.patch-installation",
+                    "DetailType": "Patch Installation Completed",
+                    "Detail": {
+                      "correlation_id.$": "$.correlation_id",
+                      "environment": "${Environment}",
+                      "total_batches.$": "$.final_results.total_batches",
+                      "successful_batches.$": "$.final_results.successful_batches",
+                      "failed_batches.$": "$.final_results.failed_batches",
+                      "success_rate.$": "$.final_results.overall_success_rate",
+                      "timestamp.$": "$$.State.EnteredTime"
+                    },
+                    "EventBusName": "${EventBusName}"
+                  }
+                ]
+              },
+              "Next": "SendCompletionNotification"
+            },
+            "SendCompletionNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NotificationServiceFunctionArn}",
+                "Payload": {
+                  "notification_type": "completion",
+                  "workflow": "patch-installation",
+                  "results.$": "$.final_results",
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "Next": "WorkflowSuccess"
+            },
+            "HandleInstallationFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::lambda:invoke",
+              "Parameters": {
+                "FunctionName": "${NotificationServiceFunctionArn}",
+                "Payload": {
+                  "notification_type": "failure",
+                  "workflow": "patch-installation",
+                  "error.$": "$.workflow_error.Cause",
+                  "correlation_id.$": "$.correlation_id"
+                }
+              },
+              "Next": "WorkflowFailed"
+            },
+            "WorkflowSuccess": {
+              "Type": "Succeed",
+              "Comment": "Patch installation workflow completed successfully"
+            },
+            "WorkflowFailed": {
+              "Type": "Fail",
+              "Comment": "Patch installation workflow failed"
+            }
+          }
+        }
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Workflow
+          Value: 'patch-installation'
+
+Outputs:
+  PatchApprovalWorkflowArn:
+    Description: 'ARN of the patch approval workflow'
+    Value: !GetAtt PatchApprovalWorkflow.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-PatchApprovalWorkflow'
+
+  ComplianceRemediationWorkflowArn:
+    Description: 'ARN of the compliance remediation workflow'
+    Value: !GetAtt ComplianceRemediationWorkflow.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceRemediationWorkflow'
+
+  PatchInstallationWorkflowArn:
+    Description: 'ARN of the patch installation workflow'
+    Value: !GetAtt PatchInstallationWorkflow.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-PatchInstallationWorkflow'
+
+  StepFunctionsExecutionRoleArn:
+    Description: 'ARN of the Step Functions execution role'
+    Value: !GetAtt StepFunctionsExecutionRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-StepFunctionsExecutionRole'

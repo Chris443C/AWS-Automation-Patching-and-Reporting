@@ -1,0 +1,582 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Config Integration with Custom Compliance Rules for Patching Automation'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for compliance notifications'
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+  
+  S3BucketName:
+    Type: String
+    Default: 'aws-patching-automation-reports'
+    Description: 'S3 bucket name for storing Config logs and reports'
+
+Resources:
+  # S3 Bucket for AWS Config logs
+  ConfigLogBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub '${S3BucketName}-config-logs-${AWS::AccountId}-${Environment}'
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LifecycleConfiguration:
+        Rules:
+          - Id: DeleteOldConfigLogs
+            Status: Enabled
+            ExpirationInDays: 2555  # 7 years for compliance
+
+  # AWS Config Configuration Recorder
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Properties:
+      Name: !Sub 'ConfigRecorder-${Environment}'
+      RoleARN: !GetAtt ConfigServiceRole.Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResources: true
+        ResourceTypes:
+          - AWS::EC2::Instance
+          - AWS::EC2::SecurityGroup
+          - AWS::EC2::VPC
+          - AWS::EC2::Subnet
+          - AWS::EC2::NetworkAcl
+          - AWS::EC2::RouteTable
+          - AWS::S3::Bucket
+          - AWS::IAM::User
+          - AWS::IAM::Role
+          - AWS::IAM::Group
+          - AWS::CloudTrail::Trail
+          - AWS::Config::ConfigurationRecorder
+          - AWS::SSM::PatchBaseline
+          - AWS::SSM::MaintenanceWindow
+
+  # AWS Config Delivery Channel
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Properties:
+      Name: !Sub 'ConfigDeliveryChannel-${Environment}'
+      S3BucketName: !Ref ConfigLogBucket
+      S3KeyPrefix: !Sub 'config-logs/${Environment}/'
+      SnsTopicARN: !Ref ComplianceNotificationTopic
+
+  # IAM Role for AWS Config
+  ConfigServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ConfigServiceRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: config.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSConfigRole
+      Policies:
+        - PolicyName: ConfigCustomPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ConfigLogBucket.Arn
+                  - !Sub '${ConfigLogBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ComplianceNotificationTopic
+
+  # SNS Topic for Compliance Notifications
+  ComplianceNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'ConfigComplianceNotifications-${Environment}'
+      DisplayName: !Sub 'Config Compliance Notifications - ${Environment}'
+
+  # SNS Subscription
+  ComplianceNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ComplianceNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # Custom Config Rules for Patching Compliance
+
+  # Rule 1: Check if instances have SSM agent installed
+  SSMAgentInstalledRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'SSMAgentInstalled-${Environment}'
+      Description: 'Checks if EC2 instances have SSM agent installed for patching automation'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::Instance
+      Source:
+        Owner: AWS
+        SourceIdentifier: EC2_INSTANCE_MANAGED_BY_SSM
+      ConfigRuleState: ACTIVE
+
+  # Rule 2: Check if instances are in compliance with patch baseline
+  PatchComplianceRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'PatchCompliance-${Environment}'
+      Description: 'Checks if instances are compliant with patch baseline'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::Instance
+      Source:
+        Owner: AWS
+        SourceIdentifier: EC2_INSTANCE_PATCHES_COMPLIANCE
+      ConfigRuleState: ACTIVE
+
+  # Rule 3: Check if security groups allow unrestricted access
+  SecurityGroupRestrictedAccessRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'SecurityGroupRestrictedAccess-${Environment}'
+      Description: 'Checks if security groups allow unrestricted access'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::EC2::SecurityGroup
+      Source:
+        Owner: AWS
+        SourceIdentifier: RESTRICTED_INCOMING_TRAFFIC
+      ConfigRuleState: ACTIVE
+
+  # Rule 4: Check if S3 buckets have encryption enabled
+  S3BucketEncryptionRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'S3BucketEncryption-${Environment}'
+      Description: 'Checks if S3 buckets have encryption enabled'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::S3::Bucket
+      Source:
+        Owner: AWS
+        SourceIdentifier: S3_BUCKET_SERVER_SIDE_ENCRYPTION_ENABLED
+      ConfigRuleState: ACTIVE
+
+  # Rule 5: Check if CloudTrail is enabled
+  CloudTrailEnabledRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'CloudTrailEnabled-${Environment}'
+      Description: 'Checks if CloudTrail is enabled for audit logging'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::CloudTrail::Trail
+      Source:
+        Owner: AWS
+        SourceIdentifier: CLOUD_TRAIL_ENABLED
+      ConfigRuleState: ACTIVE
+
+  # Custom Lambda-based Config Rule for patch approval workflow
+  PatchApprovalWorkflowRule:
+    Type: AWS::Config::ConfigRule
+    Properties:
+      ConfigRuleName: !Sub 'PatchApprovalWorkflow-${Environment}'
+      Description: 'Custom rule to check patch approval workflow compliance'
+      Scope:
+        ComplianceResourceTypes:
+          - AWS::SSM::PatchBaseline
+          - AWS::SSM::MaintenanceWindow
+      Source:
+        Owner: CUSTOM_LAMBDA
+        SourceDetails:
+          - EventSource: aws.config
+            MessageType: ConfigurationItemChangeNotification
+        SourceIdentifier: !GetAtt CustomConfigRuleFunction.Arn
+      ConfigRuleState: ACTIVE
+
+  # Lambda Function for Custom Config Rule
+  CustomConfigRuleFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'CustomConfigRule-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt CustomConfigRuleRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          
+          def handler(event, context):
+              # Parse the event
+              invoking_event = json.loads(event['invokingEvent'])
+              rule_parameters = json.loads(event.get('ruleParameters', '{}'))
+              
+              # Get the configuration item
+              configuration_item = invoking_event['configurationItem']
+              resource_type = configuration_item['resourceType']
+              resource_id = configuration_item['resourceId']
+              
+              # Initialize AWS Config client
+              config = boto3.client('config')
+              
+              # Custom compliance logic based on resource type
+              if resource_type == 'AWS::SSM::PatchBaseline':
+                  compliance_result = check_patch_baseline_compliance(configuration_item)
+              elif resource_type == 'AWS::SSM::MaintenanceWindow':
+                  compliance_result = check_maintenance_window_compliance(configuration_item)
+              else:
+                  compliance_result = {
+                      'ComplianceType': 'NOT_APPLICABLE',
+                      'Annotation': f'Resource type {resource_type} not supported by this rule'
+                  }
+              
+              # Prepare the evaluation
+              evaluation = {
+                  'ComplianceResourceType': resource_type,
+                  'ComplianceResourceId': resource_id,
+                  'ComplianceType': compliance_result['ComplianceType'],
+                  'Annotation': compliance_result['Annotation'],
+                  'OrderingTimestamp': invoking_event['notificationCreationTime']
+              }
+              
+              # Put the evaluation
+              config.put_evaluations(
+                  Evaluations=[evaluation],
+                  ResultToken=event['resultToken']
+              )
+              
+              return evaluation
+          
+          def check_patch_baseline_compliance(configuration_item):
+              """Check if patch baseline is properly configured"""
+              try:
+                  # Check if patch baseline has approval rules
+                  baseline_config = configuration_item.get('configuration', {})
+                  
+                  if not baseline_config:
+                      return {
+                          'ComplianceType': 'NON_COMPLIANT',
+                          'Annotation': 'Patch baseline configuration not found'
+                      }
+                  
+                  # Check for approval rules
+                  approval_rules = baseline_config.get('ApprovalRules', {})
+                  if not approval_rules:
+                      return {
+                          'ComplianceType': 'NON_COMPLIANT',
+                          'Annotation': 'Patch baseline must have approval rules configured'
+                      }
+                  
+                  return {
+                      'ComplianceType': 'COMPLIANT',
+                      'Annotation': 'Patch baseline is properly configured with approval rules'
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'ComplianceType': 'NON_COMPLIANT',
+                      'Annotation': f'Error checking patch baseline compliance: {str(e)}'
+                  }
+          
+          def check_maintenance_window_compliance(configuration_item):
+              """Check if maintenance window is properly configured"""
+              try:
+                  # Check if maintenance window is enabled and properly configured
+                  window_config = configuration_item.get('configuration', {})
+                  
+                  if not window_config:
+                      return {
+                          'ComplianceType': 'NON_COMPLIANT',
+                          'Annotation': 'Maintenance window configuration not found'
+                      }
+                  
+                  # Check if window is enabled
+                  enabled = window_config.get('Enabled', False)
+                  if not enabled:
+                      return {
+                          'ComplianceType': 'NON_COMPLIANT',
+                          'Annotation': 'Maintenance window must be enabled'
+                      }
+                  
+                  # Check for proper schedule
+                  schedule = window_config.get('Schedule', '')
+                  if not schedule:
+                      return {
+                          'ComplianceType': 'NON_COMPLIANT',
+                          'Annotation': 'Maintenance window must have a schedule configured'
+                      }
+                  
+                  return {
+                      'ComplianceType': 'COMPLIANT',
+                      'Annotation': 'Maintenance window is properly configured'
+                  }
+                  
+              except Exception as e:
+                  return {
+                      'ComplianceType': 'NON_COMPLIANT',
+                      'Annotation': f'Error checking maintenance window compliance: {str(e)}'
+                  }
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+  # IAM Role for Custom Config Rule Lambda
+  CustomConfigRuleRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'CustomConfigRuleRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CustomConfigRulePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:PutEvaluations
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:DescribeConfigRules
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ssm:DescribePatchBaselines
+                  - ssm:DescribeMaintenanceWindows
+                  - ssm:GetMaintenanceWindow
+                Resource: '*'
+
+  # Lambda Permission for Config
+  CustomConfigRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref CustomConfigRuleFunction
+      Action: lambda:InvokeFunction
+      Principal: config.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  # EventBridge Rule for Config Compliance Changes
+  ConfigComplianceRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'ConfigComplianceChanges-${Environment}'
+      Description: 'Capture AWS Config compliance changes'
+      EventPattern:
+        source:
+          - aws.config
+        detail-type:
+          - AWS Config Rule Compliance Change
+        detail:
+          configRuleName:
+            - !Ref SSMAgentInstalledRule
+            - !Ref PatchComplianceRule
+            - !Ref SecurityGroupRestrictedAccessRule
+            - !Ref S3BucketEncryptionRule
+            - !Ref CloudTrailEnabledRule
+            - !Ref PatchApprovalWorkflowRule
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt ConfigComplianceProcessorFunction.Arn
+          Id: ConfigComplianceTarget
+
+  # Lambda Function to Process Config Compliance Changes
+  ConfigComplianceProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'ConfigComplianceProcessor-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt ConfigComplianceProcessorRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              config = boto3.client('config')
+              sns = boto3.client('sns')
+              s3 = boto3.client('s3')
+              
+              # Process Config compliance changes
+              for record in event['Records']:
+                  detail = record['detail']
+                  config_rule_name = detail['configRuleName']
+                  new_evaluation_result = detail['newEvaluationResult']
+                  
+                  # Generate compliance report
+                  compliance_report = {
+                      'timestamp': datetime.now().isoformat(),
+                      'environment': os.environ['ENVIRONMENT'],
+                      'config_rule_name': config_rule_name,
+                      'compliance_type': new_evaluation_result['complianceType'],
+                      'resource_type': new_evaluation_result['complianceResourceType'],
+                      'resource_id': new_evaluation_result['complianceResourceId'],
+                      'annotation': new_evaluation_result.get('annotation', ''),
+                      'ordering_timestamp': new_evaluation_result['orderingTimestamp']
+                  }
+                  
+                  # Send notification for non-compliant resources
+                  if new_evaluation_result['complianceType'] == 'NON_COMPLIANT':
+                      send_compliance_notification(compliance_report, sns)
+                  
+                  # Store compliance report in S3
+                  store_compliance_report(compliance_report, s3)
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Config compliance changes processed')
+              }
+          
+          def send_compliance_notification(report, sns):
+              """Send compliance notification via SNS"""
+              subject = f"Config Compliance Alert - {report['config_rule_name']}"
+              
+              message = f"""
+          AWS Config Compliance Alert
+          
+          Environment: {report['environment']}
+          Config Rule: {report['config_rule_name']}
+          Resource Type: {report['resource_type']}
+          Resource ID: {report['resource_id']}
+          Compliance Status: {report['compliance_type']}
+          
+          Details: {report['annotation']}
+          
+          Timestamp: {report['timestamp']}
+              """
+              
+              sns.publish(
+                  TopicArn=os.environ['SNS_TOPIC_ARN'],
+                  Subject=subject,
+                  Message=message
+              )
+          
+          def store_compliance_report(report, s3):
+              """Store compliance report in S3"""
+              timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+              key = f"config-compliance/{report['environment']}/{timestamp}_{report['config_rule_name']}.json"
+              
+              s3.put_object(
+                  Bucket=os.environ['S3_BUCKET'],
+                  Key=key,
+                  Body=json.dumps(report, indent=2),
+                  ContentType='application/json'
+              )
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !Ref ConfigLogBucket
+          SNS_TOPIC_ARN: !Ref ComplianceNotificationTopic
+
+  # IAM Role for Config Compliance Processor
+  ConfigComplianceProcessorRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'ConfigComplianceProcessorRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ConfigComplianceProcessorPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - config:GetComplianceDetailsByConfigRule
+                  - config:DescribeConfigRules
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                Resource:
+                  - !GetAtt ConfigLogBucket.Arn
+                  - !Sub '${ConfigLogBucket.Arn}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ComplianceNotificationTopic
+
+  # Lambda Permission for EventBridge
+  ConfigComplianceProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref ConfigComplianceProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ConfigComplianceRule.Arn
+
+  # CloudWatch Log Group for Lambda Functions
+  CustomConfigRuleLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/CustomConfigRule-${Environment}'
+      RetentionInDays: 30
+
+  ConfigComplianceProcessorLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/ConfigComplianceProcessor-${Environment}'
+      RetentionInDays: 30
+
+Outputs:
+  ConfigRecorderName:
+    Description: 'AWS Config Recorder Name'
+    Value: !Ref ConfigRecorder
+    Export:
+      Name: !Sub '${AWS::StackName}-ConfigRecorderName'
+
+  ConfigLogBucketName:
+    Description: 'S3 Bucket for Config logs'
+    Value: !Ref ConfigLogBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-ConfigLogBucketName'
+
+  ComplianceNotificationTopicArn:
+    Description: 'SNS Topic ARN for compliance notifications'
+    Value: !Ref ComplianceNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceNotificationTopicArn'
+
+  CustomConfigRuleFunctionArn:
+    Description: 'Custom Config Rule Lambda Function ARN'
+    Value: !GetAtt CustomConfigRuleFunction.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-CustomConfigRuleFunctionArn' 

@@ -1,0 +1,248 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'AWS Security Hub Configuration with CIS and PCI Compliance Standards'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+  
+  EnableCISBenchmark:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable CIS AWS Foundations Benchmark'
+  
+  EnablePCIDSS:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: 'Enable PCI DSS compliance standard'
+  
+  NotificationEmail:
+    Type: String
+    Description: 'Email address for compliance notifications'
+    AllowedPattern: '^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+Resources:
+  # Security Hub Configuration
+  SecurityHubConfiguration:
+    Type: AWS::SecurityHub::Hub
+    Properties:
+      EnableDefaultStandards: false
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Purpose
+          Value: ComplianceMonitoring
+
+  # CIS AWS Foundations Benchmark
+  CISBenchmarkStandard:
+    Type: AWS::SecurityHub::Standard
+    Condition: EnableCIS
+    Properties:
+      StandardsArn: arn:aws:securityhub:::ruleset/cis-aws-foundations-benchmark/v/1.2.0
+      StandardsSubscriptionArn: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:subscription/cis-aws-foundations-benchmark/v/1.2.0'
+
+  # PCI DSS Compliance Standard
+  PCIDSSStandard:
+    Type: AWS::SecurityHub::Standard
+    Condition: EnablePCI
+    Properties:
+      StandardsArn: arn:aws:securityhub:${AWS::Region}::standards/pci-dss/v/3.2.1
+      StandardsSubscriptionArn: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:subscription/pci-dss/v/3.2.1'
+
+  # Custom Security Controls
+  CustomSecurityControls:
+    Type: AWS::SecurityHub::Control
+    Properties:
+      ControlArn: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:control/custom-patching-compliance'
+      ControlStatus: ENABLED
+      DisabledReason: ''
+      StandardsControlArn: !Sub 'arn:aws:securityhub:${AWS::Region}:${AWS::AccountId}:control/custom-patching-compliance'
+
+  # SNS Topic for Compliance Notifications
+  ComplianceNotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'ComplianceNotifications-${Environment}'
+      DisplayName: !Sub 'Compliance Notifications - ${Environment}'
+
+  # SNS Subscription for Compliance Notifications
+  ComplianceNotificationSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref ComplianceNotificationTopic
+      Protocol: email
+      Endpoint: !Ref NotificationEmail
+
+  # IAM Role for Security Hub Integration
+  SecurityHubIntegrationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'SecurityHubIntegrationRole-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AWSSecurityHubFullAccess
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+      Policies:
+        - PolicyName: SecurityHubIntegrationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - securityhub:GetFindings
+                  - securityhub:BatchUpdateFindings
+                  - securityhub:UpdateSecurityHubConfiguration
+                  - securityhub:GetEnabledStandards
+                  - securityhub:GetStandardsControl
+                  - securityhub:UpdateStandardsControl
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:ListBucket
+                Resource:
+                  - !Sub 'arn:aws:s3:::aws-patching-automation-reports-${AWS::AccountId}-${Environment}'
+                  - !Sub 'arn:aws:s3:::aws-patching-automation-reports-${AWS::AccountId}-${Environment}/*'
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: !Ref ComplianceNotificationTopic
+
+  # EventBridge Rule for Security Hub Findings
+  SecurityHubFindingsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub 'SecurityHubFindings-${Environment}'
+      Description: 'Capture Security Hub findings for compliance analysis'
+      EventPattern:
+        source:
+          - aws.securityhub
+        detail-type:
+          - Security Hub Findings - Imported
+        detail:
+          findings:
+            - WorkflowStatus:
+                - NEW
+                - NOTIFIED
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SecurityHubProcessorFunction.Arn
+          Id: SecurityHubProcessorTarget
+
+  # Lambda Permission for EventBridge
+  SecurityHubProcessorPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref SecurityHubProcessorFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SecurityHubFindingsRule.Arn
+
+  # Lambda Function to Process Security Hub Findings
+  SecurityHubProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub 'SecurityHubProcessor-${Environment}'
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt SecurityHubIntegrationRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          
+          def handler(event, context):
+              securityhub = boto3.client('securityhub')
+              s3 = boto3.client('s3')
+              sns = boto3.client('sns')
+              
+              # Process Security Hub findings
+              findings = event.get('detail', {}).get('findings', [])
+              
+              for finding in findings:
+                  # Analyze finding for compliance impact
+                  compliance_impact = analyze_compliance_impact(finding)
+                  
+                  if compliance_impact['requires_action']:
+                      # Send notification
+                      sns.publish(
+                          TopicArn=os.environ['SNS_TOPIC_ARN'],
+                          Subject=f"Compliance Alert: {finding['Title']}",
+                          Message=json.dumps(compliance_impact, indent=2)
+                      )
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Security Hub findings processed')
+              }
+          
+          def analyze_compliance_impact(finding):
+              # Analyze finding against CIS and PCI requirements
+              return {
+                  'finding_id': finding['Id'],
+                  'severity': finding['Severity']['Label'],
+                  'compliance_standards': finding.get('Compliance', {}).get('Standards', []),
+                  'requires_action': finding['Severity']['Label'] in ['HIGH', 'CRITICAL'],
+                  'cis_impact': check_cis_impact(finding),
+                  'pci_impact': check_pci_impact(finding)
+              }
+          
+          def check_cis_impact(finding):
+              # Check if finding affects CIS compliance
+              cis_controls = ['1.1', '1.2', '1.3', '2.1', '2.2', '2.3']  # Example CIS controls
+              return any(control in str(finding) for control in cis_controls)
+          
+          def check_pci_impact(finding):
+              # Check if finding affects PCI compliance
+              pci_requirements = ['7.1', '7.2', '8.1', '8.2', '10.1', '10.2']  # Example PCI requirements
+              return any(req in str(finding) for req in pci_requirements)
+      Timeout: 300
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          S3_BUCKET: !Sub 'aws-patching-automation-reports-${AWS::AccountId}-${Environment}'
+          SNS_TOPIC_ARN: !Ref ComplianceNotificationTopic
+
+  # CloudWatch Log Group for Security Hub Lambda
+  SecurityHubLogGroup:
+    Type: AWS::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/SecurityHubProcessor-${Environment}'
+      RetentionInDays: 30
+
+Conditions:
+  EnableCIS: !Equals [!Ref EnableCISBenchmark, 'true']
+  EnablePCI: !Equals [!Ref EnablePCIDSS, 'true']
+
+Outputs:
+  SecurityHubHubArn:
+    Description: 'Security Hub Hub ARN'
+    Value: !GetAtt SecurityHubConfiguration.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityHubHubArn'
+
+  ComplianceNotificationTopicArn:
+    Description: 'SNS Topic ARN for compliance notifications'
+    Value: !Ref ComplianceNotificationTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-ComplianceNotificationTopicArn'
+
+  SecurityHubIntegrationRoleArn:
+    Description: 'IAM Role ARN for Security Hub integration'
+    Value: !GetAtt SecurityHubIntegrationRole.Arn
+    Export:
+      Name: !Sub '${AWS::StackName}-SecurityHubIntegrationRoleArn' 

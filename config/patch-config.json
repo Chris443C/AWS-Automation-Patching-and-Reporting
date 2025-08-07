@@ -1,0 +1,131 @@
+{
+  "environment": "dev",
+  "patchAutomation": {
+    "autoApprovalThreshold": 8.0,
+    "approvalWorkflow": "manual",
+    "scanSchedule": "cron(0 2 * * ? *)",
+    "installSchedule": "cron(0 4 * * ? *)",
+    "approvalDelay": 7,
+    "maxConcurrency": 10,
+    "maxErrors": 2,
+    "complianceSeverity": "CRITICAL"
+  },
+  "patchClassifications": {
+    "windows": [
+      "SecurityUpdates",
+      "CriticalUpdates",
+      "DefinitionUpdates"
+    ],
+    "linux": [
+      "Security",
+      "Bugfix"
+    ]
+  },
+  "severityLevels": {
+    "critical": {
+      "score": 10.0,
+      "autoApprove": true,
+      "notificationRequired": true
+    },
+    "important": {
+      "score": 7.0,
+      "autoApprove": false,
+      "notificationRequired": true
+    },
+    "moderate": {
+      "score": 5.0,
+      "autoApprove": false,
+      "notificationRequired": false
+    },
+    "low": {
+      "score": 2.0,
+      "autoApprove": false,
+      "notificationRequired": false
+    }
+  },
+  "inspector": {
+    "scanSchedule": "cron(0 */6 * * ? *)",
+    "severityThreshold": "MEDIUM",
+    "autoRemediation": false,
+    "notificationChannels": ["sns", "s3"]
+  },
+  "notifications": {
+    "sns": {
+      "enabled": true,
+      "topics": ["patch-approval-notifications"]
+    },
+    "email": {
+      "enabled": true,
+      "recipients": ["admin@company.com"]
+    }
+  },
+  "reporting": {
+    "s3Bucket": "aws-patching-automation-reports",
+    "retentionDays": 365,
+    "formats": ["json", "csv"],
+    "schedules": {
+      "daily": "cron(0 6 * * ? *)",
+      "weekly": "cron(0 6 ? * SUN *)",
+      "monthly": "cron(0 6 1 * ? *)"
+    }
+  },
+  "security": {
+    "encryption": {
+      "s3Encryption": "AES256",
+      "parameterStoreEncryption": true
+    },
+    "accessControl": {
+      "leastPrivilege": true,
+      "roleBasedAccess": true
+    },
+    "audit": {
+      "cloudTrailEnabled": true,
+      "logRetention": 30
+    }
+  },
+  "instances": {
+    "targetGroups": [
+      {
+        "name": "production-servers",
+        "tags": {
+          "Environment": "prod",
+          "PatchGroup": "prod-servers"
+        },
+        "operatingSystem": "WINDOWS",
+        "approvalWorkflow": "manual"
+      },
+      {
+        "name": "development-servers",
+        "tags": {
+          "Environment": "dev",
+          "PatchGroup": "dev-servers"
+        },
+        "operatingSystem": "WINDOWS",
+        "approvalWorkflow": "automatic"
+      }
+    ]
+  },
+  "maintenanceWindows": {
+    "scanWindow": {
+      "schedule": "cron(0 2 * * ? *)",
+      "duration": 2,
+      "cutoff": 1
+    },
+    "installWindow": {
+      "schedule": "cron(0 4 * * ? *)",
+      "duration": 4,
+      "cutoff": 1
+    }
+  },
+  "compliance": {
+    "standards": [
+      "CIS",
+      "NIST",
+      "SOX"
+    ],
+    "reporting": {
+      "enabled": true,
+      "frequency": "weekly"
+    }
+  }
+} 

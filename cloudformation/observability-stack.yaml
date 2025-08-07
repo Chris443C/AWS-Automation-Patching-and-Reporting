@@ -1,0 +1,466 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Observability infrastructure with X-Ray, custom metrics, and dashboards'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: 'dev'
+    AllowedValues: ['dev', 'staging', 'prod']
+    Description: 'Environment name'
+
+Resources:
+  # X-Ray Service Map
+  XRayServiceMap:
+    Type: AWS::XRay::ServiceMap
+    Properties:
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: 'patching-automation'
+
+  # CloudWatch Dashboard for Observability
+  PatchingAutomationDashboard:
+    Type: AWS::CloudWatch::Dashboard
+    Properties:
+      DashboardName: !Sub 'PatchingAutomation-${Environment}'
+      DashboardBody: !Sub |
+        {
+          "widgets": [
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/PatchingAutomation/Microservices", "ComplianceScore", "Environment", "${Environment}", "Service", "ComplianceScanner" ],
+                  [ ".", "TotalVulnerabilities", ".", ".", ".", "VulnerabilityScanner" ],
+                  [ ".", "CriticalVulnerabilities", ".", ".", ".", "." ],
+                  [ ".", "PatchableVulnerabilities", ".", ".", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Security Metrics Overview",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 12,
+              "y": 0,
+              "width": 12,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "compliance-scanner-microservice-${Environment}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Invocations", ".", "." ],
+                  [ ".", "Duration", ".", "vulnerability-scanner-microservice-${Environment}" ],
+                  [ ".", "Errors", ".", "." ],
+                  [ ".", "Invocations", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Lambda Performance Metrics",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 0,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/StepFunctions", "ExecutionSucceeded", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-approval-workflow-${Environment}" ],
+                  [ ".", "ExecutionFailed", ".", "." ],
+                  [ ".", "ExecutionThrottled", ".", "." ],
+                  [ ".", "ExecutionAborted", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "Step Functions - Patch Approval Workflow",
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 8,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Events", "SuccessfulInvocations", "EventBusName", "patching-automation-${Environment}" ],
+                  [ ".", "FailedInvocations", ".", "." ],
+                  [ ".", "MatchedEvents", ".", "." ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "EventBridge Metrics",
+                "period": 300,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "metric",
+              "x": 16,
+              "y": 6,
+              "width": 8,
+              "height": 6,
+              "properties": {
+                "metrics": [
+                  [ "AWS/X-Ray", "TracesReceived" ],
+                  [ ".", "TracesProcessed" ],
+                  [ ".", "LatencyHigh" ],
+                  [ ".", "ErrorRate" ]
+                ],
+                "view": "timeSeries",
+                "stacked": false,
+                "region": "${AWS::Region}",
+                "title": "X-Ray Tracing Metrics",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "log",
+              "x": 0,
+              "y": 12,
+              "width": 24,
+              "height": 6,
+              "properties": {
+                "query": "SOURCE '/aws/lambda/compliance-scanner-microservice-${Environment}' | fields @timestamp, @message, correlation_id, level\n| filter level = \"ERROR\"\n| sort @timestamp desc\n| limit 20",
+                "region": "${AWS::Region}",
+                "title": "Recent Errors - Compliance Scanner",
+                "view": "table"
+              }
+            },
+            {
+              "type": "number",
+              "x": 0,
+              "y": 18,
+              "width": 6,
+              "height": 3,
+              "properties": {
+                "metrics": [
+                  [ "AWS/PatchingAutomation/Microservices", "ComplianceScore", "Environment", "${Environment}", "Service", "ComplianceScanner" ]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Current Compliance Score",
+                "period": 300,
+                "stat": "Average"
+              }
+            },
+            {
+              "type": "number",
+              "x": 6,
+              "y": 18,
+              "width": 6,
+              "height": 3,
+              "properties": {
+                "metrics": [
+                  [ "AWS/PatchingAutomation/Microservices", "CriticalVulnerabilities", "Environment", "${Environment}", "Service", "VulnerabilityScanner" ]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Critical Vulnerabilities",
+                "period": 300,
+                "stat": "Maximum"
+              }
+            },
+            {
+              "type": "number",
+              "x": 12,
+              "y": 18,
+              "width": 6,
+              "height": 3,
+              "properties": {
+                "metrics": [
+                  [ "AWS/StepFunctions", "ExecutionSucceeded", "StateMachineArn", "arn:aws:states:${AWS::Region}:${AWS::AccountId}:stateMachine:patch-approval-workflow-${Environment}" ]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Successful Workflows (24h)",
+                "period": 86400,
+                "stat": "Sum"
+              }
+            },
+            {
+              "type": "number",
+              "x": 18,
+              "y": 18,
+              "width": 6,
+              "height": 3,
+              "properties": {
+                "metrics": [
+                  [ "AWS/Lambda", "Duration", "FunctionName", "compliance-scanner-microservice-${Environment}" ]
+                ],
+                "view": "singleValue",
+                "region": "${AWS::Region}",
+                "title": "Avg Scan Duration (ms)",
+                "period": 300,
+                "stat": "Average"
+              }
+            }
+          ]
+        }
+
+  # CloudWatch Alarms for Critical Metrics
+  ComplianceScoreCriticalAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'ComplianceScore-Critical-${Environment}'
+      AlarmDescription: 'Compliance score has dropped below critical threshold'
+      MetricName: ComplianceScore
+      Namespace: AWS/PatchingAutomation/Microservices
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 60
+      ComparisonOperator: LessThanThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+        - Name: Service
+          Value: ComplianceScanner
+      AlarmActions:
+        - !Ref CriticalAlertsSnsTopic
+      OKActions:
+        - !Ref CriticalAlertsSnsTopic
+      TreatMissingData: breaching
+
+  CriticalVulnerabilitiesAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'CriticalVulnerabilities-High-${Environment}'
+      AlarmDescription: 'High number of critical vulnerabilities detected'
+      MetricName: CriticalVulnerabilities
+      Namespace: AWS/PatchingAutomation/Microservices
+      Statistic: Maximum
+      Period: 300
+      EvaluationPeriods: 1
+      Threshold: 5
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: Environment
+          Value: !Ref Environment
+        - Name: Service
+          Value: VulnerabilityScanner
+      AlarmActions:
+        - !Ref CriticalAlertsSnsTopic
+
+  WorkflowFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'WorkflowFailures-${Environment}'
+      AlarmDescription: 'Step Functions workflows are failing'
+      MetricName: ExecutionsFailed
+      Namespace: AWS/StepFunctions
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 3
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      AlarmActions:
+        - !Ref CriticalAlertsSnsTopic
+
+  LambdaErrorRateAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub 'LambdaErrorRate-${Environment}'
+      AlarmDescription: 'Lambda error rate is too high'
+      MetricName: ErrorRate
+      Namespace: AWS/Lambda
+      Statistic: Average
+      Period: 300
+      EvaluationPeriods: 3
+      Threshold: 0.05
+      ComparisonOperator: GreaterThanThreshold
+      AlarmActions:
+        - !Ref WarningAlertsSnsTopic
+
+  # SNS Topics for Alerts
+  CriticalAlertsSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'PatchingAutomation-CriticalAlerts-${Environment}'
+      DisplayName: !Sub 'Critical Alerts - Patching Automation ${Environment}'
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  WarningAlertsSnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub 'PatchingAutomation-WarningAlerts-${Environment}'
+      DisplayName: !Sub 'Warning Alerts - Patching Automation ${Environment}'
+      KmsMasterKeyId: 'alias/aws/sns'
+
+  # CloudWatch Composite Alarms
+  SystemHealthCompositeAlarm:
+    Type: AWS::CloudWatch::CompositeAlarm
+    Properties:
+      AlarmName: !Sub 'SystemHealth-Composite-${Environment}'
+      AlarmDescription: 'Overall system health composite alarm'
+      AlarmRule: !Sub |
+        ALARM(${ComplianceScoreCriticalAlarm}) OR
+        ALARM(${CriticalVulnerabilitiesAlarm}) OR
+        ALARM(${WorkflowFailureAlarm})
+      ActionsEnabled: true
+      AlarmActions:
+        - !Ref CriticalAlertsSnsTopic
+
+  # CloudWatch Insights Queries
+  ErrorAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub 'ErrorAnalysis-${Environment}'
+      LogGroupNames:
+        - !Sub '/aws/lambda/compliance-scanner-microservice-${Environment}'
+        - !Sub '/aws/lambda/vulnerability-scanner-microservice-${Environment}'
+        - !Sub '/aws/lambda/patch-approver-microservice-${Environment}'
+      QueryString: |
+        fields @timestamp, @message, correlation_id, level, error_type
+        | filter level = "ERROR"
+        | stats count() by error_type
+        | sort count desc
+
+  PerformanceAnalysisQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub 'PerformanceAnalysis-${Environment}'
+      LogGroupNames:
+        - !Sub '/aws/lambda/compliance-scanner-microservice-${Environment}'
+        - !Sub '/aws/lambda/vulnerability-scanner-microservice-${Environment}'
+      QueryString: |
+        fields @timestamp, @message, correlation_id, @duration
+        | filter @message like /completed/
+        | stats avg(@duration), max(@duration), min(@duration) by bin(5m)
+
+  ComplianceTrackingQuery:
+    Type: AWS::Logs::QueryDefinition
+    Properties:
+      Name: !Sub 'ComplianceTracking-${Environment}'
+      LogGroupNames:
+        - !Sub '/aws/lambda/compliance-scanner-microservice-${Environment}'
+      QueryString: |
+        fields @timestamp, @message, compliance_score, violations_count
+        | filter @message like /compliance_scan_completed/
+        | sort @timestamp desc
+
+  # X-Ray Sampling Rules for Cost Optimization
+  XRaySamplingRule:
+    Type: AWS::XRay::SamplingRule
+    Properties:
+      SamplingRule:
+        RuleName: !Sub 'PatchingAutomation-${Environment}'
+        Priority: 9000
+        FixedRate: 0.1
+        ReservoirSize: 1
+        ServiceName: 'patching-automation'
+        ServiceType: '*'
+        Host: '*'
+        HTTPMethod: '*'
+        URLPath: '*'
+        Version: 1
+        Attributes:
+          environment: !Ref Environment
+
+  # Custom CloudWatch Metrics Filters
+  ErrorMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/compliance-scanner-microservice-${Environment}'
+      FilterPattern: '[timestamp, request_id, level="ERROR", ...]'
+      MetricTransformations:
+        - MetricNamespace: AWS/PatchingAutomation/Errors
+          MetricName: ErrorCount
+          MetricValue: '1'
+          DefaultValue: 0
+          Unit: Count
+
+  ComplianceScoreMetricFilter:
+    Type: AWS::Logs::MetricFilter
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/compliance-scanner-microservice-${Environment}'
+      FilterPattern: '[timestamp, request_id, level, message="compliance_scan_completed", correlation_id, score]'
+      MetricTransformations:
+        - MetricNamespace: AWS/PatchingAutomation/Business
+          MetricName: ComplianceScoreFromLogs
+          MetricValue: '$score'
+          Unit: Percent
+
+  # Application Insights for Enhanced Monitoring
+  ApplicationInsights:
+    Type: AWS::ApplicationInsights::Application
+    Properties:
+      ResourceGroupName: !Ref ApplicationResourceGroup
+      AutoConfigurationEnabled: true
+      AutoCreate: true
+      Tags:
+        - Key: Environment
+          Value: !Ref Environment
+        - Key: Application
+          Value: 'patching-automation'
+
+  ApplicationResourceGroup:
+    Type: AWS::ResourceGroups::Group
+    Properties:
+      Name: !Sub 'patching-automation-${Environment}'
+      Description: !Sub 'Resource group for patching automation ${Environment} environment'
+      ResourceQuery:
+        Type: TAG_FILTERS_1_0
+        Query:
+          ResourceTypeFilters:
+            - AWS::Lambda::Function
+            - AWS::StepFunctions::StateMachine
+            - AWS::Events::EventBus
+            - AWS::Logs::LogGroup
+          TagFilters:
+            - Key: Environment
+              Values:
+                - !Ref Environment
+            - Key: Application
+              Values:
+                - patching-automation
+
+Outputs:
+  DashboardURL:
+    Description: 'URL of the CloudWatch Dashboard'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/cloudwatch/home?region=${AWS::Region}#dashboards:name=${PatchingAutomationDashboard}'
+    Export:
+      Name: !Sub '${AWS::StackName}-DashboardURL'
+
+  XRayServiceMapURL:
+    Description: 'URL of the X-Ray Service Map'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/xray/home?region=${AWS::Region}#/service-map'
+    Export:
+      Name: !Sub '${AWS::StackName}-XRayServiceMapURL'
+
+  CriticalAlertsTopicArn:
+    Description: 'ARN of the critical alerts SNS topic'
+    Value: !Ref CriticalAlertsSnsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-CriticalAlertsTopicArn'
+
+  WarningAlertsTopicArn:
+    Description: 'ARN of the warning alerts SNS topic'
+    Value: !Ref WarningAlertsSnsTopic
+    Export:
+      Name: !Sub '${AWS::StackName}-WarningAlertsTopicArn'
+
+  ApplicationInsightsUrl:
+    Description: 'URL of the Application Insights dashboard'
+    Value: !Sub 'https://${AWS::Region}.console.aws.amazon.com/systems-manager/appinsights/application/${ApplicationInsights}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ApplicationInsightsUrl'
