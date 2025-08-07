@@ -89,39 +89,39 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
 
 ```
 AWS-Automation-Patching-and-Reporting/
-â”œâ”€â”€ cloudformation/           # Infrastructure as Code
-â”‚   â”œâ”€â”€ main-stack.yaml      # Main CloudFormation stack
-â”‚   â”œâ”€â”€ inspector-stack.yaml # Inspector configuration
-â”‚   â”œâ”€â”€ patch-stack.yaml     # Patch Manager setup
-â”‚   â”œâ”€â”€ security-hub-stack.yaml # Security Hub configuration
-â”‚   â”œâ”€â”€ aws-config-stack.yaml # AWS Config rules and monitoring
-â”‚   â””â”€â”€ audit-manager-stack.yaml # AWS Audit Manager integration
-â”œâ”€â”€ scripts/                  # Automation scripts
-â”‚   â”œâ”€â”€ python/              # Python automation
-â”‚   â”‚   â”œâ”€â”€ inspector_handler.py
-â”‚   â”‚   â”œâ”€â”€ patch_approver.py
-â”‚   â”‚   â”œâ”€â”€ compliance_scanner.py
-â”‚   â”‚   â”œâ”€â”€ config_compliance_integration.py
-â”‚   â”‚   â””â”€â”€ audit_manager_integration.py
-â”‚   â””â”€â”€ powershell/          # PowerShell scripts
-â”‚       â”œâ”€â”€ audit_services.ps1
-â”‚       â”œâ”€â”€ compliance_audit.ps1
-â”‚       â””â”€â”€ patch_inventory.ps1
-â”œâ”€â”€ lambda/                   # Lambda functions
-â”‚   â”œâ”€â”€ inspector_processor/
-â”‚   â”œâ”€â”€ patch_approver/
-â”‚   â”œâ”€â”€ security_hub_processor/
-â”‚   â”œâ”€â”€ config_compliance_processor/
-â”‚   â””â”€â”€ audit_manager_processor/
-â”œâ”€â”€ templates/                # SSM document templates
-â”‚   â”œâ”€â”€ audit-document.yaml
-â”‚   â””â”€â”€ patch-document.yaml
-â””â”€â”€ docs/                     # Documentation
-    â”œâ”€â”€ deployment-guide.md
-    â”œâ”€â”€ security-hub-integration.md
-    â”œâ”€â”€ aws-config-integration.md
-    â”œâ”€â”€ audit-manager-integration.md
-    â””â”€â”€ troubleshooting.md
+├── cloudformation/             # Infrastructure as Code
+│   ├── main-stack.yaml         # Main CloudFormation stack
+│   ├── inspector-stack.yaml    # Inspector configuration
+│   ├── patch-stack.yaml        # Patch Manager setup
+│   ├── security-hub-stack.yaml # Security Hub configuration
+│   ├── aws-config-stack.yaml   # AWS Config rules and monitoring
+│   └── audit-manager-stack.yaml # AWS Audit Manager integration
+├── scripts/                    # Automation scripts
+│   ├── python/                 # Python automation
+│   │   ├── inspector_handler.py
+│   │   ├── patch_approver.py
+│   │   ├── compliance_scanner.py
+│   │   ├── config_compliance_integration.py
+│   │   └── audit_manager_integration.py
+│   └── powershell/             # PowerShell scripts
+│       ├── audit_services.ps1
+│       ├── compliance_audit.ps1
+│       └── patch_inventory.ps1
+├── lambda/                     # Lambda functions
+│   ├── inspector_processor/
+│   ├── patch_approver/
+│   ├── security_hub_processor/
+│   ├── config_compliance_processor/
+│   └── audit_manager_processor/
+├── templates/                  # SSM document templates
+│   ├── audit-document.yaml
+│   └── patch-document.yaml
+└── docs/                       # Documentation
+    ├── deployment-guide.md
+    ├── security-hub-integration.md
+    ├── aws-config-integration.md
+    ├── audit-manager-integration.md
+    └── troubleshooting.md
 ```
 
 ## Quick Start
@@ -448,4 +448,5 @@ For issues and questions:
 - [PCI DSS Requirements](https://www.pcisecuritystandards.org/document_library)
 - [AWS Systems Manager Patch Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager.html)
 - [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #
+
 
