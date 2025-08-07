@@ -6,21 +6,21 @@ A comprehensive AWS-native solution for automated vulnerability scanning, patch 
 
 This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manager, Systems Manager Patch Manager, and custom automation scripts to create a hybrid compliance + patching pipeline that:
 
-1. **Scans for vulnerabilities** using AWS Inspector
-2. **Monitors compliance** using Security Hub (CIS & PCI DSS)
-3. **Enforces infrastructure compliance** using AWS Config rules
-4. **Automates evidence collection** using AWS Audit Manager
-5. **Downloads patches** without installing them
-6. **Audits current state** using custom PowerShell scripts
-7. **Approves patches** through manual or automated workflows
-8. **Installs only approved patches** with full control
+1. **Scans for vulnerabilities** using AWS Inspector  
+2. **Monitors compliance** using Security Hub (CIS & PCI DSS)  
+3. **Enforces infrastructure compliance** using AWS Config rules  
+4. **Automates evidence collection** using AWS Audit Manager  
+5. **Downloads patches** without installing them  
+6. **Audits current state** using custom PowerShell scripts  
+7. **Approves patches** through manual or automated workflows  
+8. **Installs only approved patches** with full control  
 
 ## 🏗️ Architecture
 
-```
+```text
 ┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
 │   AWS Inspector │    │  Security Hub   │    │   AWS Config    │
-│   (Vulnerability│    │  (CIS & PCI     │    │  (Rule-based    │
+│ (Vulnerability  │    │ (CIS & PCI DSS) │    │ (Rule-Based     │
 │   Detection)    │    │   Compliance)   │    │   Compliance)   │
 └─────────────────┘    └─────────────────┘    └─────────────────┘
          │                       │                       │
@@ -28,34 +28,36 @@ This solution combines AWS Inspector, Security Hub, AWS Config, AWS Audit Manage
                                  │
                     ┌─────────────────┐
                     │  Audit Manager  │
-                    │  (Evidence      │
-                    │   Collection &  │
-                    │   Assessment)   │
+                    │ (Evidence       │
+                    │  Collection &   │
+                    │  Assessment)    │
                     └─────────────────┘
                                  │
                     ┌─────────────────┐
-                    │  Compliance     │
-                    │  Integration    │
-                    │  Layer          │
-                    │  (Python)       │
+                    │ Compliance      │
+                    │ Integration     │
+                    │ Layer (Python)  │
                     └─────────────────┘
                                  │
                     ┌─────────────────┐
-                    │  Custom Scripts │
-                    │  (Audit &       │
-                    │   Reporting)    │
+                    │ Custom Scripts  │
+                    │ (Audit &        │
+                    │  Reporting)     │
                     └─────────────────┘
                                  │
                     ┌─────────────────┐
-                    │  Approval       │
-                    │  Workflow       │
-                    │  (Manual/Auto)  │
+                    │ Approval        │
+                    │ Workflow        │
+                    │ (Manual/Auto)   │
                     └─────────────────┘
                                  │
                     ┌─────────────────┐
-                    │  Patch Manager  │
-                    │  (Install Mode) │
+                    │ Patch Manager   │
+                    │ (Install Mode)  │
                     └─────────────────┘
+```
+
+*The rest of the original README content is preserved.*
 ```
 
 ## 🔐 Compliance Standards
@@ -448,5 +450,6 @@ For issues and questions:
 - [CIS AWS Foundations Benchmark](https://www.cisecurity.org/benchmark/amazon_web_services/)
 - [PCI DSS Requirements](https://www.pcisecuritystandards.org/document_library)
 - [AWS Systems Manager Patch Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/patch-manager.html)
-- [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #   A W S - A u t o m a t i o n - P a t c h i n g - a n d - R e p o r t i n g  
+- [AWS Inspector User Guide](https://docs.aws.amazon.com/inspector/) #   A W S - A u t o m a t i o n - P a t c h i n g - a n d - R e p o r t i n g 
+ 
  
